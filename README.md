@@ -252,3 +252,7 @@ src/main/java/io/github/lindseyz1205/videopipeline/
   policy that lets S3 send to SQS) would be provisioned with Terraform or CDK.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.
 - **Observability.** Metrics and alarms on queue age and dead-letter queue depth.
+
+## License
+
+[MIT](LICENSE)
