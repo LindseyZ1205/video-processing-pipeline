@@ -11,7 +11,7 @@ the worker is idempotent: it retries transient failures and leaves poison messag
 Everything runs locally on [LocalStack](https://github.com/localstack/localstack). The integration tests run the
 whole flow against it with Testcontainers.
 
-**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), LocalStack, Testcontainers, GitHub Actions.
+**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Terraform, LocalStack, Testcontainers, GitHub Actions.
 
 ## Architecture
 
