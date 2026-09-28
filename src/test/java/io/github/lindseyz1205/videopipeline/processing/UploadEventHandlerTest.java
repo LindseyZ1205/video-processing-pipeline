@@ -13,7 +13,12 @@ import static org.mockito.Mockito.when;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
 import io.github.lindseyz1205.videopipeline.transcription.TranscriptionService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.util.unit.DataSize;
@@ -30,16 +35,19 @@ class UploadEventHandlerTest {
     private static final String BUCKET = "video-uploads";
     private static final String UPLOAD_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
     private static final String KEY = "uploads/user-1/" + UPLOAD_ID + "/talk.mp4";
+    private static final Instant NOW = Instant.parse("2026-09-28T12:00:05Z");
     private static final String EVENT = """
-            {"Records":[{"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"%s"},"object":{"key":"%s"}}}]}
+            {"Records":[{"eventName":"ObjectCreated:Put","eventTime":"2026-09-28T12:00:00.000Z",
+              "s3":{"bucket":{"name":"%s"},"object":{"key":"%s"}}}]}
             """.formatted(BUCKET, KEY);
     private static final Lease LEASE = new Lease(UPLOAD_ID, "token-1", 1);
 
     private final JobStore jobs = mock(JobStore.class);
     private final S3Client s3 = mock(S3Client.class);
     private final TranscriptionService transcription = mock(TranscriptionService.class);
-    private final UploadEventHandler handler =
-            new UploadEventHandler(jobs, s3, transcription, DataSize.ofMegabytes(100));
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final UploadEventHandler handler = new UploadEventHandler(jobs, s3, transcription,
+            new PipelineMetrics(metrics, Clock.fixed(NOW, ZoneOffset.UTC)), DataSize.ofMegabytes(100));
 
     @BeforeEach
     void uploadedObjectExists() {
@@ -54,6 +62,9 @@ class UploadEventHandlerTest {
         when(jobs.complete(LEASE, "hello")).thenReturn(true);
 
         assertThat(handler.handle(EVENT)).isTrue();
+        assertThat(events("processed")).isEqualTo(1);
+        assertThat(transcriptions("success")).isEqualTo(1);
+        assertThat(metrics.get("pipeline.events.lag").timer().totalTime(TimeUnit.SECONDS)).isEqualTo(5);
     }
 
     @Test
@@ -63,6 +74,8 @@ class UploadEventHandlerTest {
 
         assertThat(handler.handle(EVENT)).isTrue();
         verifyNoInteractions(transcription);
+        assertThat(events("duplicate")).isEqualTo(1);
+        assertThat(metrics.get("pipeline.events.lag").timer().count()).isZero();
     }
 
     @Test
@@ -72,6 +85,7 @@ class UploadEventHandlerTest {
 
         assertThat(handler.handle(EVENT)).isFalse();
         verifyNoInteractions(transcription);
+        assertThat(events("busy")).isEqualTo(1);
     }
 
     @Test
@@ -81,6 +95,7 @@ class UploadEventHandlerTest {
         when(jobs.complete(LEASE, "hello")).thenReturn(false);
 
         assertThat(handler.handle(EVENT)).isFalse();
+        assertThat(events("busy")).isEqualTo(1);
     }
 
     @Test
@@ -90,6 +105,8 @@ class UploadEventHandlerTest {
 
         assertThat(handler.handle(EVENT)).isFalse();
         verify(jobs).fail(eq(LEASE), contains("provider timed out"));
+        assertThat(events("failed")).isEqualTo(1);
+        assertThat(transcriptions("failure")).isEqualTo(1);
     }
 
     @Test
@@ -101,6 +118,7 @@ class UploadEventHandlerTest {
         assertThat(handler.handle(EVENT)).isTrue();
         verify(jobs).fail(eq(LEASE), contains("limit"));
         verifyNoInteractions(transcription);
+        assertThat(events("rejected")).isEqualTo(1);
     }
 
     @Test
@@ -121,5 +139,14 @@ class UploadEventHandlerTest {
     void deletesEventsForObjectsThatAreNotUploads() {
         assertThat(handler.handle(EVENT.replace(KEY, "transcripts/summary.txt"))).isTrue();
         verifyNoInteractions(jobs);
+        assertThat(events("ignored")).isEqualTo(1);
+    }
+
+    private double events(String outcome) {
+        return metrics.get("pipeline.events").tag("outcome", outcome).counter().count();
+    }
+
+    private long transcriptions(String outcome) {
+        return metrics.get("pipeline.transcription").tag("outcome", outcome).timer().count();
     }
 }

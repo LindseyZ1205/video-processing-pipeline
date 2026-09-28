@@ -38,9 +38,19 @@ pipeline:
       api-key: ${OPENAI_API_KEY:}
       model: whisper-1
       base-url: https://api.openai.com/v1
+  metrics:
+    queue-depth-interval: 30s
 
 management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health, prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Histogram buckets, so Prometheus can compute percentiles (histogram_quantile).
+      percentiles-histogram:
+        "[pipeline.transcription]": true
+        "[pipeline.events.lag]": true

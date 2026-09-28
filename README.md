@@ -11,7 +11,7 @@ the worker is idempotent: it retries transient failures and leaves poison messag
 Everything runs locally on [LocalStack](https://github.com/localstack/localstack). The integration tests run the
 whole flow against it with Testcontainers.
 
-**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Terraform, LocalStack, Testcontainers, GitHub Actions.
+**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Micrometer + Prometheus, Terraform, LocalStack, Testcontainers, GitHub Actions.
 
 ## Architecture
 
@@ -208,6 +208,36 @@ outputs, with the in-app bootstrap turned off, and runs [`scripts/smoke-test.sh`
 upload, PUT a file, wait for the transcript. That tests the infrastructure code and the service against each other,
 not only each one on its own. [infra/terraform/README.md](infra/terraform/README.md) explains how to apply it to AWS.
 
+## Observability
+
+Metrics are exported for Prometheus at `/actuator/prometheus`:
+
+| Metric | Type | What it shows |
+|---|---|---|
+| `pipeline_events_total{outcome}` | counter | Every S3 event record the worker handled: `processed`, `duplicate`, `busy`, `failed`, `rejected` or `ignored` |
+| `pipeline_transcription_seconds{outcome}` | histogram | Time spent in the transcription provider, by `success` or `failure` |
+| `pipeline_events_lag_seconds` | histogram | From the upload finishing to a worker starting on it: queueing plus retry delays |
+| `pipeline_queue_messages{queue,state}` | gauge | Visible and in-flight messages on the event queue and the dead-letter queue, refreshed every 30 s |
+| `pipeline_sqs_receive_errors_total` | counter | Failed polls of SQS |
+
+Alerts would be built on queries like these:
+
+```promql
+# Anything in the dead-letter queue needs a person to look at it
+pipeline_queue_messages{queue="dead-letter", state="visible"} > 0
+
+# Share of attempts that failed over the last 5 minutes
+sum(rate(pipeline_events_total{outcome="failed"}[5m])) / sum(rate(pipeline_events_total[5m]))
+
+# 95th percentile of the time from upload to pickup
+histogram_quantile(0.95, sum by (le) (rate(pipeline_events_lag_seconds_bucket[5m])))
+```
+
+Log lines about a message or a job carry its `messageId` and `jobId` in the MDC. With
+`LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` every line is JSON with those IDs as separate fields, so one upload's whole
+history is a single query in CloudWatch Logs Insights or Elasticsearch. The CI smoke test runs the service this way and
+checks that the IDs appear.
+
 ## Tests
 
 ```bash
@@ -222,13 +252,18 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - an uploaded file ends up `COMPLETED` with its transcript;
   - the same event delivered three times is transcribed exactly once;
   - a failed attempt is retried and then succeeds;
-  - an event that keeps failing lands in the dead-letter queue after 3 attempts.
+  - an event that keeps failing lands in the dead-letter queue after 3 attempts;
+  - the Prometheus endpoint reports the pipeline's metrics.
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate, lease held
-  elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event.
+  elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event. It also checks
+  the metric that each case records.
+- `QueueDepthGaugesTest` checks the queue depth gauges, including that they keep their last value while SQS is
+  unreachable.
 - `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server.
 - `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys) and key sanitizing.
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
-  LocalStack, and runs the smoke test against the service configured from the Terraform outputs.
+  LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
+  service's Prometheus metrics and JSON logs.
 
 ## Configuration
 
@@ -247,6 +282,7 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.worker.visibility-timeout` | `60s` | Retry delay and job lease; keep it above the longest transcription |
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |
+| `pipeline.metrics.queue-depth-interval` | `30s` | How often the queue depth gauges are read from SQS |
 
 Against real AWS, leave the endpoint empty so the SDK uses its default credential chain. The resource names come
 from `terraform output -json service_environment` ([Infrastructure](#infrastructure)), not from `bootstrap-resources`.
@@ -257,7 +293,7 @@ Environment variables such as `PIPELINE_BUCKET` override any of these settings.
 ```
 src/main/java/io/github/lindseyz1205/videopipeline/
 ├── upload/         REST API, presigned URLs, object key layout
-├── processing/     SQS poller, S3 event parsing, idempotent event handler
+├── processing/     SQS poller, S3 event parsing, idempotent event handler, metrics
 ├── job/            job state and leases in DynamoDB
 ├── transcription/  TranscriptionService and its fake / OpenAI providers
 └── config/         AWS clients, settings, LocalStack bootstrap
@@ -273,7 +309,8 @@ scripts/            end-to-end smoke test
 - **Deployment.** Terraform covers the resources the service uses, not where the service runs. There is no container
   image, no compute (ECS, App Runner) and no remote Terraform state yet.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.
-- **Observability.** Metrics and alarms on queue age and dead-letter queue depth.
+- **Dashboards and alerts.** The metrics and example queries are here, but no Grafana dashboard or alert rules are
+  checked in.
 
 ## License
 
