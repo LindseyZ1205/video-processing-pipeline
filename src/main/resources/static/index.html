@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Processing Pipeline</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --accent: #2563eb;
+      --muted: #6b7280;
+      --ok: #15803d;
+      --error: #b91c1c;
+    }
+    body { margin: 0; padding: 2rem 1rem; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 40rem; margin: 0 auto; }
+    h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    .lead { margin: 0 0 1.5rem; color: var(--muted); }
+    label { display: block; margin: 1rem 0 .25rem; font-weight: 600; }
+    input[type=text] { box-sizing: border-box; width: 100%; padding: .5rem; font: inherit; }
+    button { margin-top: 1.25rem; padding: .6rem 1.2rem; border: 0; border-radius: .375rem; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    progress { width: 100%; margin-top: 1rem; }
+    ol { padding-left: 1.25rem; }
+    .done { color: var(--ok); }
+    .error { color: var(--error); }
+    pre { padding: 1rem; border-radius: .375rem; background: rgba(127, 127, 127, .12); white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Video processing pipeline</h1>
+  <p class="lead">
+    The file goes straight to S3 through a presigned URL. S3 notifies SQS, a worker transcribes the file,
+    and this page polls the job until it finishes.
+  </p>
+
+  <label for="userId">User ID</label>
+  <input id="userId" type="text" value="demo-user" autocomplete="off">
+
+  <label for="file">Audio or video file</label>
+  <input id="file" type="file" accept="audio/*,video/*">
+
+  <button id="start" type="button" disabled>Upload and transcribe</button>
+  <progress id="progress" max="100" value="0" hidden></progress>
+
+  <ol id="log"></ol>
+  <pre id="transcript" hidden></pre>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  $('file').addEventListener('change', () => { $('start').disabled = $('file').files.length === 0; });
+  $('start').addEventListener('click', run);
+
+  function log(message, kind) {
+    const item = document.createElement('li');
+    item.textContent = message;
+    if (kind) item.className = kind;
+    $('log').append(item);
+  }
+
+  async function run() {
+    const file = $('file').files[0];
+    $('start').disabled = true;
+    $('log').replaceChildren();
+    $('transcript').hidden = true;
+    try {
+      log('Requesting an upload URL…');
+      const upload = await api('/api/uploads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: $('userId').value.trim(),
+          fileName: file.name,
+          contentType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+        }),
+      });
+      log(`Uploading to ${upload.objectKey}`);
+      await putToS3(upload, file);
+      log('Upload finished. Waiting for the worker…');
+      const job = await waitForJob(upload.uploadId);
+      log(`Transcribed after ${job.attempts} attempt(s).`, 'done');
+      $('transcript').textContent = job.transcript;
+      $('transcript').hidden = false;
+    } catch (error) {
+      log(error.message, 'error');
+    } finally {
+      $('start').disabled = false;
+      $('progress').hidden = true;
+    }
+  }
+
+  async function api(path, options) {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail || detail; } catch { /* no JSON body */ }
+      throw new Error(`Request failed (${response.status}): ${detail}`);
+    }
+    return response.json();
+  }
+
+  function putToS3(upload, file) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(upload.method, upload.uploadUrl);
+      // These headers are part of the signature; S3 rejects the upload if they differ.
+      for (const [name, value] of Object.entries(upload.headers)) xhr.setRequestHeader(name, value);
+      $('progress').value = 0;
+      $('progress').hidden = false;
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) $('progress').value = (100 * event.loaded) / event.total;
+      };
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300)
+        ? resolve()
+        : reject(new Error(`S3 rejected the upload (${xhr.status})`));
+      xhr.onerror = () => reject(new Error('Network error while uploading to S3'));
+      xhr.send(file);
+    });
+  }
+
+  async function waitForJob(uploadId) {
+    let lastSeen = '';
+    let job = null;
+    for (let i = 0; i < 180; i++) {
+      const response = await fetch(`/api/uploads/${encodeURIComponent(uploadId)}`);
+      if (response.ok) {
+        job = await response.json();
+        const seen = `${job.status}/${job.attempts}`;
+        if (seen !== lastSeen) {
+          lastSeen = seen;
+          log(job.status === 'FAILED'
+            ? `Attempt ${job.attempts} failed: ${job.error}`
+            : `Job is ${job.status}${job.attempts ? ` (attempt ${job.attempts})` : ''}`);
+        }
+        if (job.status === 'COMPLETED') return job;
+      }
+      await sleep(1000);
+    }
+    throw new Error(job && job.status === 'FAILED' ? `Gave up: ${job.error}` : 'Timed out waiting for the worker');
+  }
+</script>
+</body>
+</html>

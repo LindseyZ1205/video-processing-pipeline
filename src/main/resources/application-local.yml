@@ -1,0 +1,8 @@
+# Run against LocalStack from docker-compose.yml:
+#   ./gradlew bootRun --args='--spring.profiles.active=local'
+pipeline:
+  aws:
+    endpoint: http://localhost:4566
+    access-key: test
+    secret-key: test
+    bootstrap-resources: true

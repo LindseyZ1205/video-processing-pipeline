@@ -1,0 +1,16 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+out/
+
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+.DS_Store
+
+# LocalStack state if you mount a volume
+volume/
+.localstack/

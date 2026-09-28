@@ -1,0 +1,12 @@
+# Local AWS for development: S3, SQS and DynamoDB on http://localhost:4566.
+# The app creates the bucket, queues and table itself when it runs with the "local" profile.
+services:
+  localstack:
+    image: localstack/localstack:4.6.0
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      - SERVICES=s3,sqs,dynamodb
+      # Let the demo page on localhost:8080 PUT files straight to LocalStack's S3.
+      - DISABLE_CORS_CHECKS=1
+      - DISABLE_CUSTOM_CORS_S3=1

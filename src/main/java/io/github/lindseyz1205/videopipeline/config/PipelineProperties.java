@@ -1,0 +1,54 @@
+package io.github.lindseyz1205.videopipeline.config;
+
+import java.time.Duration;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.util.unit.DataSize;
+
+/**
+ * Settings under {@code pipeline.*}. Defaults live in {@code application.yml}.
+ */
+@ConfigurationProperties(prefix = "pipeline")
+public record PipelineProperties(
+        Aws aws,
+        String bucket,
+        Queue queue,
+        Jobs jobs,
+        Upload upload,
+        Worker worker,
+        Transcription transcription) {
+
+    /**
+     * @param endpoint           endpoint override for LocalStack; empty means real AWS
+     * @param bootstrapResources create the bucket, queues and table on startup (LocalStack and tests only)
+     */
+    public record Aws(String region, String endpoint, String accessKey, String secretKey, boolean bootstrapResources) {
+    }
+
+    /**
+     * @param maxReceiveCount deliveries before SQS moves a message to the dead-letter queue
+     */
+    public record Queue(String name, String deadLetterName, int maxReceiveCount) {
+    }
+
+    /**
+     * @param retention how long job records are kept before DynamoDB TTL deletes them
+     */
+    public record Jobs(String table, Duration retention) {
+    }
+
+    public record Upload(Duration urlTtl, DataSize maxFileSize) {
+    }
+
+    /**
+     * @param visibilityTimeout how long a received message stays hidden from other pollers. It is also the lease on
+     *                          the job, so when a crashed worker's message reappears the next delivery can take over.
+     */
+    public record Worker(boolean enabled, int concurrency, int maxMessages, Duration waitTime, Duration visibilityTimeout) {
+    }
+
+    public record Transcription(String provider, OpenAi openai) {
+
+        public record OpenAi(String apiKey, String model, String baseUrl) {
+        }
+    }
+}

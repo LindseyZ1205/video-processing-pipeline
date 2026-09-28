@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: video-processing-pipeline
+  mvc:
+    problemdetails:
+      enabled: true
+
+pipeline:
+  aws:
+    region: us-east-1
+    # Leave empty for real AWS (SDK default endpoints and credential chain).
+    endpoint:
+    access-key:
+    secret-key:
+    # Create the bucket, queues, notification and table on startup. LocalStack only.
+    bootstrap-resources: false
+  bucket: video-uploads
+  queue:
+    name: video-upload-events
+    dead-letter-name: video-upload-events-dlq
+    max-receive-count: 3
+  jobs:
+    table: video-processing-jobs
+    retention: 7d
+  upload:
+    url-ttl: 15m
+    max-file-size: 100MB
+  worker:
+    enabled: true
+    concurrency: 2
+    max-messages: 1
+    wait-time: 10s
+    # Retry delay for failed messages and lease length for a job being processed.
+    visibility-timeout: 60s
+  transcription:
+    provider: fake # fake | openai
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      model: whisper-1
+      base-url: https://api.openai.com/v1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
