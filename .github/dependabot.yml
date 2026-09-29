@@ -1,0 +1,33 @@
+# Weekly dependency update PRs. CI (unit tests, LocalStack integration tests, Terraform + smoke test) decides whether
+# each one is safe to merge.
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR a week for all minor and patch updates, instead of one per library.
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Spring Boot 4 is a migration, not a routine bump.
+      - dependency-name: "org.springframework.boot"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: terraform
+    directory: /infra/terraform
+    schedule:
+      interval: weekly
+    ignore:
+      # CI applies the configuration to LocalStack 4.6; moving to provider 6.x is a deliberate upgrade.
+      - dependency-name: "hashicorp/aws"
+        update-types: ["version-update:semver-major"]

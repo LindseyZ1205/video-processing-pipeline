@@ -25,6 +25,28 @@ jobs:
       - name: Build and test
         run: ./gradlew build --no-daemon
 
+      - name: Coverage summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+
+          report = ET.parse("build/reports/jacoco/test/jacocoTestReport.xml").getroot()
+          print("### Test coverage\n")
+          print("| Counter | Coverage | Covered / total |")
+          print("|---|---|---|")
+          for counter in report.findall("counter"):
+              if counter.get("type") in ("LINE", "BRANCH"):
+                  covered, missed = int(counter.get("covered")), int(counter.get("missed"))
+                  total = covered + missed
+                  print(f"| {counter.get('type').lower()} | {100 * covered / total:.1f}% | {covered} / {total} |")
+          PY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: build/reports/jacoco/test/html/
+
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v7
