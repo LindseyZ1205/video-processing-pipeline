@@ -16,6 +16,12 @@ data "aws_iam_policy_document" "service" {
   }
 
   statement {
+    sid       = "PublishQueueDepthMetrics"
+    actions   = ["sqs:GetQueueUrl", "sqs:GetQueueAttributes"]
+    resources = [aws_sqs_queue.events.arn, aws_sqs_queue.dead_letter.arn]
+  }
+
+  statement {
     sid       = "TrackJobs"
     actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.jobs.arn]

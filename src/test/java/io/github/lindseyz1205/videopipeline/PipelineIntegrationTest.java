@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
@@ -46,8 +47,10 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
                 "pipeline.aws.bootstrap-resources=true",
                 "pipeline.worker.visibility-timeout=3s",
                 "pipeline.worker.wait-time=1s",
-                "pipeline.queue.max-receive-count=3"
+                "pipeline.queue.max-receive-count=3",
+                "pipeline.metrics.queue-depth-interval=1s"
         })
+@AutoConfigureObservability // tests skip metrics export by default; this turns on /actuator/prometheus
 class PipelineIntegrationTest {
 
     private static final LocalStackContainer LOCALSTACK =
@@ -142,6 +145,20 @@ class PipelineIntegrationTest {
     }
 
     @Test
+    void exposesPipelineMetricsForPrometheus() throws Exception {
+        CreateUploadResponse upload = createUpload("metrics.mp4");
+        putFile(upload);
+        awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
+
+        String scrape = api.getForObject("/actuator/prometheus", String.class);
+
+        assertThat(sum(scrape, "pipeline_events_total", "outcome=\"processed\"")).isGreaterThanOrEqualTo(1);
+        assertThat(sum(scrape, "pipeline_transcription_seconds_count", "outcome=\"success\"")).isGreaterThanOrEqualTo(1);
+        assertThat(sum(scrape, "pipeline_events_lag_seconds_count", "")).isGreaterThanOrEqualTo(1);
+        assertThat(scrape).contains("pipeline_queue_messages{", "queue=\"dead-letter\"", "state=\"in-flight\"");
+    }
+
+    @Test
     void refusesFilesThatCannotBeTranscribed() {
         var request = new CreateUploadRequest("test-user", "notes.pdf", "application/pdf", 1_000);
 
@@ -201,6 +218,14 @@ class PipelineIntegrationTest {
 
     private String queueUrl(String queueName) {
         return sqs.getQueueUrl(r -> r.queueName(queueName)).queueUrl();
+    }
+
+    /** Adds up the samples of {@code metric} whose labels contain {@code label}, from Prometheus text format. */
+    private static double sum(String scrape, String metric, String label) {
+        return scrape.lines()
+                .filter(line -> line.startsWith(metric + "{") && line.contains(label))
+                .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1)))
+                .sum();
     }
 
     @TestConfiguration

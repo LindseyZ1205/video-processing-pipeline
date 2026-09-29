@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.context.SmartLifecycle;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
@@ -30,6 +31,7 @@ public class UploadEventWorker implements SmartLifecycle {
 
     private final SqsClient sqs;
     private final UploadEventHandler handler;
+    private final PipelineMetrics metrics;
     private final String queueName;
     private final PipelineProperties.Worker settings;
 
@@ -37,10 +39,11 @@ public class UploadEventWorker implements SmartLifecycle {
     private volatile String queueUrl;
     private ExecutorService pollers;
 
-    public UploadEventWorker(SqsClient sqs, UploadEventHandler handler, String queueName,
+    public UploadEventWorker(SqsClient sqs, UploadEventHandler handler, PipelineMetrics metrics, String queueName,
             PipelineProperties.Worker settings) {
         this.sqs = sqs;
         this.handler = handler;
+        this.metrics = metrics;
         this.queueName = queueName;
         this.settings = settings;
     }
@@ -74,6 +77,7 @@ public class UploadEventWorker implements SmartLifecycle {
                 if (!running) {
                     break;
                 }
+                metrics.recordReceiveError();
                 consecutiveFailures++;
                 Duration backoff = backoff(consecutiveFailures);
                 log.warn("Receiving from SQS failed {} time(s) in a row; retrying in {}s",
@@ -88,7 +92,7 @@ public class UploadEventWorker implements SmartLifecycle {
     }
 
     private void handle(Message message) {
-        try {
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("messageId", message.messageId())) {
             if (handler.handle(message.body())) {
                 sqs.deleteMessage(DeleteMessageRequest.builder()
                         .queueUrl(queueUrl)

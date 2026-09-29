@@ -81,6 +81,7 @@ jobs:
           PIPELINE_AWS_ENDPOINT: http://localhost:4566
           PIPELINE_AWS_ACCESSKEY: test
           PIPELINE_AWS_SECRETKEY: test
+          LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs # JSON logs, as they would be shipped from AWS
         run: |
           ./gradlew bootJar --no-daemon
           nohup java -jar build/libs/video-processing-pipeline-0.1.0.jar > service.log 2>&1 &
@@ -88,6 +89,11 @@ jobs:
 
       - name: Smoke test
         run: ./scripts/smoke-test.sh
+
+      - name: Check metrics and structured logs
+        run: |
+          curl -fsS http://localhost:8080/actuator/prometheus | grep -E '^pipeline_events_total\{.*outcome="processed".*\} [1-9]'
+          grep -m 3 -F '"jobId":"' service.log
 
       - name: Service log
         if: always()

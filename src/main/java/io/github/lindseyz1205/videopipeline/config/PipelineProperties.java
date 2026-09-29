@@ -15,7 +15,8 @@ public record PipelineProperties(
         Jobs jobs,
         Upload upload,
         Worker worker,
-        Transcription transcription) {
+        Transcription transcription,
+        Metrics metrics) {
 
     /**
      * @param endpoint           endpoint override for LocalStack; empty means real AWS
@@ -50,5 +51,11 @@ public record PipelineProperties(
 
         public record OpenAi(String apiKey, String model, String baseUrl) {
         }
+    }
+
+    /**
+     * @param queueDepthInterval how often the queue depth gauges are refreshed from SQS
+     */
+    public record Metrics(Duration queueDepthInterval) {
     }
 }

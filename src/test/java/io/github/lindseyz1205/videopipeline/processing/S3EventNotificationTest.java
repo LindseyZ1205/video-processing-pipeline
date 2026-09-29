@@ -3,15 +3,16 @@ package io.github.lindseyz1205.videopipeline.processing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 class S3EventNotificationTest {
 
     @Test
-    void readsBucketAndDecodedKeyFromAnObjectCreatedEvent() {
+    void readsAnObjectCreatedEvent() {
         String body = """
                 {"Records":[{"eventVersion":"2.1","eventSource":"aws:s3","awsRegion":"us-east-1",
-                  "eventName":"ObjectCreated:Put",
+                  "eventTime":"2026-09-28T19:00:03.512Z","eventName":"ObjectCreated:Put",
                   "s3":{"s3SchemaVersion":"1.0",
                         "bucket":{"name":"video-uploads","arn":"arn:aws:s3:::video-uploads"},
                         "object":{"key":"uploads/user-1/my+talk%281%29.mp4","size":1024,"eTag":"abc"}}}]}
@@ -25,6 +26,7 @@ class S3EventNotificationTest {
         assertThat(record.isObjectCreated()).isTrue();
         assertThat(record.bucketName()).isEqualTo("video-uploads");
         assertThat(record.objectKey()).isEqualTo("uploads/user-1/my talk(1).mp4");
+        assertThat(record.eventTime()).isEqualTo(Instant.parse("2026-09-28T19:00:03.512Z"));
     }
 
     @Test
@@ -41,12 +43,14 @@ class S3EventNotificationTest {
     }
 
     @Test
-    void recordsWithoutAnObjectAreNotObjectCreatedEvents() {
+    void toleratesIncompleteRecords() {
         S3EventNotification notification = S3EventNotification.parse("""
-                {"Records":[{"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"video-uploads"}}}]}
+                {"Records":[{"eventName":"ObjectCreated:Put","eventTime":"yesterday","s3":{"bucket":{"name":"video-uploads"}}}]}
                 """);
 
-        assertThat(notification.records().get(0).isObjectCreated()).isFalse();
+        S3EventNotification.EventRecord record = notification.records().get(0);
+        assertThat(record.isObjectCreated()).isFalse();
+        assertThat(record.eventTime()).isNull();
     }
 
     @Test

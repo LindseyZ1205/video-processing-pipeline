@@ -1,9 +1,12 @@
 package io.github.lindseyz1205.videopipeline.config;
 
 import io.github.lindseyz1205.videopipeline.job.JobStore;
+import io.github.lindseyz1205.videopipeline.processing.PipelineMetrics;
+import io.github.lindseyz1205.videopipeline.processing.QueueDepthGauges;
 import io.github.lindseyz1205.videopipeline.processing.UploadEventHandler;
 import io.github.lindseyz1205.videopipeline.processing.UploadEventWorker;
 import io.github.lindseyz1205.videopipeline.transcription.TranscriptionService;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,13 +22,25 @@ public class PipelineConfiguration {
     }
 
     @Bean
-    public UploadEventHandler uploadEventHandler(JobStore jobs, S3Client s3, TranscriptionService transcription,
-            PipelineProperties properties) {
-        return new UploadEventHandler(jobs, s3, transcription, properties.upload().maxFileSize());
+    public PipelineMetrics pipelineMetrics(MeterRegistry registry, Clock clock) {
+        return new PipelineMetrics(registry, clock);
     }
 
     @Bean
-    public UploadEventWorker uploadEventWorker(SqsClient sqs, UploadEventHandler handler, PipelineProperties properties) {
-        return new UploadEventWorker(sqs, handler, properties.queue().name(), properties.worker());
+    public QueueDepthGauges queueDepthGauges(SqsClient sqs, MeterRegistry registry, PipelineProperties properties) {
+        return new QueueDepthGauges(sqs, registry, properties.queue().name(), properties.queue().deadLetterName(),
+                properties.metrics().queueDepthInterval());
+    }
+
+    @Bean
+    public UploadEventHandler uploadEventHandler(JobStore jobs, S3Client s3, TranscriptionService transcription,
+            PipelineMetrics metrics, PipelineProperties properties) {
+        return new UploadEventHandler(jobs, s3, transcription, metrics, properties.upload().maxFileSize());
+    }
+
+    @Bean
+    public UploadEventWorker uploadEventWorker(SqsClient sqs, UploadEventHandler handler, PipelineMetrics metrics,
+            PipelineProperties properties) {
+        return new UploadEventWorker(sqs, handler, metrics, properties.queue().name(), properties.worker());
     }
 }

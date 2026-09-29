@@ -10,6 +10,7 @@ import java.util.Objects;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.util.unit.DataSize;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
@@ -30,12 +31,15 @@ public class UploadEventHandler {
     private final JobStore jobs;
     private final S3Client s3;
     private final TranscriptionService transcription;
+    private final PipelineMetrics metrics;
     private final long maxFileSizeBytes;
 
-    public UploadEventHandler(JobStore jobs, S3Client s3, TranscriptionService transcription, DataSize maxFileSize) {
+    public UploadEventHandler(JobStore jobs, S3Client s3, TranscriptionService transcription, PipelineMetrics metrics,
+            DataSize maxFileSize) {
         this.jobs = jobs;
         this.s3 = s3;
         this.transcription = transcription;
+        this.metrics = metrics;
         this.maxFileSizeBytes = maxFileSize.toBytes();
     }
 
@@ -52,78 +56,69 @@ public class UploadEventHandler {
         }
         boolean deleteMessage = true;
         for (S3EventNotification.EventRecord record : notification.records()) {
-            deleteMessage &= process(record).deletesMessage;
+            EventOutcome outcome = process(record);
+            metrics.recordOutcome(outcome);
+            deleteMessage &= outcome.deletesMessage();
         }
         return deleteMessage;
     }
 
-    private Outcome process(S3EventNotification.EventRecord record) {
+    private EventOutcome process(S3EventNotification.EventRecord record) {
         if (!record.isObjectCreated()) {
             log.warn("Ignoring unexpected event {}", record.eventName());
-            return Outcome.IGNORED;
+            return EventOutcome.IGNORED;
         }
         String objectKey = record.objectKey();
         Optional<UploadKey> upload = UploadKey.parse(objectKey);
         if (upload.isEmpty()) {
             log.warn("Ignoring {}: not an upload created through the API", objectKey);
-            return Outcome.IGNORED;
+            return EventOutcome.IGNORED;
         }
         String jobId = upload.get().uploadId();
+        // Every log line about this job carries its ID (a field of its own in structured logs).
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("jobId", jobId)) {
+            return process(jobId, record, objectKey);
+        }
+    }
 
+    private EventOutcome process(String jobId, S3EventNotification.EventRecord record, String objectKey) {
         Optional<Lease> acquired = jobs.tryAcquire(jobId, record.bucketName(), objectKey);
         if (acquired.isEmpty()) {
             if (jobs.isCompleted(jobId)) {
                 log.info("Job {} is already completed; dropping the duplicate event", jobId);
-                return Outcome.DUPLICATE;
+                return EventOutcome.DUPLICATE;
             }
             log.info("Job {} is held by another worker; checking again after the visibility timeout", jobId);
-            return Outcome.BUSY;
+            return EventOutcome.BUSY;
         }
 
         Lease lease = acquired.get();
+        metrics.recordLag(record.eventTime());
         try {
             StoredObject object = describe(record.bucketName(), objectKey);
             if (object.sizeBytes() > maxFileSizeBytes) {
                 throw new UnprocessableMediaException(
                         "File is " + object.sizeBytes() + " bytes, over the " + maxFileSizeBytes + " byte limit");
             }
-            String transcript = transcription.transcribe(object);
+            String transcript = metrics.timeTranscription(() -> transcription.transcribe(object));
             if (!jobs.complete(lease, transcript)) {
-                return Outcome.BUSY;
+                return EventOutcome.BUSY;
             }
             log.info("Job {} completed on attempt {}", jobId, lease.attempt());
-            return Outcome.PROCESSED;
+            return EventOutcome.PROCESSED;
         } catch (UnprocessableMediaException e) {
             log.warn("Job {} failed permanently: {}", jobId, e.getMessage());
             jobs.fail(lease, e.getMessage());
-            return Outcome.REJECTED;
+            return EventOutcome.REJECTED;
         } catch (RuntimeException e) {
             log.warn("Job {} failed on attempt {}; SQS will redeliver the event", jobId, lease.attempt(), e);
             jobs.fail(lease, e.toString());
-            return Outcome.FAILED;
+            return EventOutcome.FAILED;
         }
     }
 
     private StoredObject describe(String bucket, String key) {
         HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
         return new StoredObject(bucket, key, Objects.requireNonNullElse(head.contentLength(), 0L), head.contentType());
-    }
-
-    private enum Outcome {
-        PROCESSED(true),
-        DUPLICATE(true),
-        IGNORED(true),
-        /** Permanent failure. Retrying cannot help, so the message does not use up SQS retries. */
-        REJECTED(true),
-        /** Another worker owns the job right now. */
-        BUSY(false),
-        /** Transient failure. The message stays so SQS retries it. */
-        FAILED(false);
-
-        private final boolean deletesMessage;
-
-        Outcome(boolean deletesMessage) {
-            this.deletesMessage = deletesMessage;
-        }
     }
 }
