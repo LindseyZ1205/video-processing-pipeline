@@ -1,0 +1,12 @@
+# Only the Gradle build files and src/ go into the image build.
+.git
+.github
+.gradle
+.idea
+.vscode
+build
+infra
+scripts
+*.md
+Dockerfile
+docker-compose.yml

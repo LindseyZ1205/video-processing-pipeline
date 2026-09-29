@@ -35,7 +35,7 @@ CI does this on every push. It applies the configuration to LocalStack, starts t
 [`scripts/smoke-test.sh`](../../scripts/smoke-test.sh). To do the same by hand:
 
 ```bash
-docker compose up -d
+docker compose up -d localstack
 pipx install terraform-local        # provides tflocal, a terraform wrapper that targets LocalStack
 cd infra/terraform
 tflocal init && tflocal apply -auto-approve

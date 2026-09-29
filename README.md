@@ -11,7 +11,7 @@ the worker is idempotent: it retries transient failures and leaves poison messag
 Everything runs locally on [LocalStack](https://github.com/localstack/localstack). The integration tests run the
 whole flow against it with Testcontainers.
 
-**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Micrometer + Prometheus, Terraform, LocalStack, Testcontainers, GitHub Actions.
+**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Micrometer + Prometheus, Terraform, Docker, LocalStack, Testcontainers, GitHub Actions.
 
 ## Architecture
 
@@ -174,16 +174,25 @@ GET /api/uploads/{uploadId}
 
 ## Running locally
 
-You need Java 17 and Docker.
+**With Docker only**, no Java needed:
 
 ```bash
-docker compose up -d
+docker compose up --build
+```
+
+Then open <http://localhost:8080>. A small page there uploads a file through the whole pipeline and shows the
+transcript. The first build takes a few minutes, because Gradle downloads the dependencies inside the image. CI
+publishes the image built from `main` to `ghcr.io/lindseyz1205/video-processing-pipeline`.
+
+**For development**, with Java 17 and Docker:
+
+```bash
+docker compose up -d localstack
 ./gradlew bootRun --args='--spring.profiles.active=local'
 ```
 
 The `local` profile points the AWS clients at LocalStack. On startup it creates the bucket, the queue and its
-dead-letter queue, the S3 → SQS notification, and the DynamoDB table. Then open <http://localhost:8080>: a small
-page there uploads a file through the whole pipeline and shows the transcript.
+dead-letter queue, the S3 → SQS notification, and the DynamoDB table.
 
 For real transcriptions:
 
@@ -264,6 +273,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
   service's Prometheus metrics and JSON logs.
+- The `docker compose + smoke test` CI job builds the image, starts the stack with `docker compose up`, and runs the
+  same smoke test. On `main` it then publishes the image to GHCR.
 
 ## Configuration
 
@@ -272,6 +283,7 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | Property | Default | Meaning |
 |---|---|---|
 | `pipeline.aws.endpoint` | empty | AWS endpoint override, e.g. `http://localhost:4566` for LocalStack |
+| `pipeline.aws.presign-endpoint` | empty | Endpoint written into presigned URLs, if browsers reach S3 at a different address than the service does (docker compose) |
 | `pipeline.aws.bootstrap-resources` | `false` | Create the bucket, queues and table on startup (LocalStack only) |
 | `pipeline.bucket` | `video-uploads` | Upload bucket |
 | `pipeline.queue.name` / `dead-letter-name` | `video-upload-events` / `…-dlq` | Event queue and its DLQ |
@@ -306,8 +318,8 @@ scripts/            end-to-end smoke test
 - **Authentication.** `userId` comes from the request body. A real service would take it from the caller's identity.
 - **Long transcriptions.** The worker should keep extending the message visibility while it works (a heartbeat),
   instead of relying on one fixed timeout.
-- **Deployment.** Terraform covers the resources the service uses, not where the service runs. There is no container
-  image, no compute (ECS, App Runner) and no remote Terraform state yet.
+- **Deployment.** Terraform covers the resources the service uses, and there is a container image, but nothing runs
+  the image yet: no compute (ECS, App Runner) and no remote Terraform state.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.
 - **Dashboards and alerts.** The metrics and example queries are here, but no Grafana dashboard or alert rules are
   checked in.

@@ -52,7 +52,8 @@ public class AwsConfiguration {
     public S3Presigner s3Presigner(AwsCredentialsProvider credentials) {
         S3Presigner.Builder builder = S3Presigner.builder().region(region()).credentialsProvider(credentials);
         if (hasEndpointOverride()) {
-            builder.endpointOverride(endpoint())
+            URI presignEndpoint = StringUtils.hasText(aws.presignEndpoint()) ? URI.create(aws.presignEndpoint()) : endpoint();
+            builder.endpointOverride(presignEndpoint)
                     .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build());
         }
         return builder.build();
