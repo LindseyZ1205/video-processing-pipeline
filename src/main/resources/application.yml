@@ -10,6 +10,8 @@ pipeline:
     region: us-east-1
     # Leave empty for real AWS (SDK default endpoints and credential chain).
     endpoint:
+    # Endpoint written into presigned URLs, if browsers reach S3 at another address (docker compose). Empty: endpoint.
+    presign-endpoint:
     access-key:
     secret-key:
     # Create the bucket, queues, notification and table on startup. LocalStack only.

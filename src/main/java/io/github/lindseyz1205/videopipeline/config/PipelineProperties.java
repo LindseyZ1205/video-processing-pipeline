@@ -20,9 +20,13 @@ public record PipelineProperties(
 
     /**
      * @param endpoint           endpoint override for LocalStack; empty means real AWS
+     * @param presignEndpoint    endpoint to put in presigned URLs, when clients reach S3 at a different address than
+     *                           the service does (in docker compose: localhost vs. the LocalStack container);
+     *                           empty means the same as {@code endpoint}
      * @param bootstrapResources create the bucket, queues and table on startup (LocalStack and tests only)
      */
-    public record Aws(String region, String endpoint, String accessKey, String secretKey, boolean bootstrapResources) {
+    public record Aws(String region, String endpoint, String presignEndpoint, String accessKey, String secretKey,
+            boolean bootstrapResources) {
     }
 
     /**

@@ -1,5 +1,5 @@
-# Local AWS for development: S3, SQS and DynamoDB on http://localhost:4566.
-# The app creates the bucket, queues and table itself when it runs with the "local" profile.
+# The whole pipeline on your machine: `docker compose up --build`, then open http://localhost:8080.
+# For development with Gradle, start only LocalStack: `docker compose up -d localstack`.
 services:
   localstack:
     image: localstack/localstack:4.6.0
@@ -10,3 +10,19 @@ services:
       # Let the demo page on localhost:8080 PUT files straight to LocalStack's S3.
       - DISABLE_CORS_CHECKS=1
       - DISABLE_CUSTOM_CORS_S3=1
+
+  app:
+    build: .
+    image: video-processing-pipeline:local
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Creates the bucket, queues and table in LocalStack on startup.
+      SPRING_PROFILES_ACTIVE: local
+      # The service reaches LocalStack by its compose name, but the browser on your machine reaches it at localhost,
+      # so presigned URLs need the second address.
+      PIPELINE_AWS_ENDPOINT: http://localstack:4566
+      PIPELINE_AWS_PRESIGNENDPOINT: http://localhost:4566
+    depends_on:
+      localstack:
+        condition: service_healthy # the LocalStack image ships its own healthcheck
