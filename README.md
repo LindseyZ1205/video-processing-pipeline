@@ -1,6 +1,7 @@
 # video-processing-pipeline
 
 [![CI](https://github.com/LindseyZ1205/video-processing-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/LindseyZ1205/video-processing-pipeline/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/LindseyZ1205/video-processing-pipeline/actions/workflows/codeql.yml/badge.svg)](https://github.com/LindseyZ1205/video-processing-pipeline/actions/workflows/codeql.yml)
 
 A Spring Boot service that takes audio and video uploads and transcribes them asynchronously on AWS.
 
@@ -264,6 +265,17 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
   service's Prometheus metrics and JSON logs.
+
+Each CI run puts line and branch coverage (JaCoCo, unit and integration tests combined) in the run summary, and
+uploads the HTML report as the `coverage-report` artifact.
+
+### Keeping it current
+
+- **Dependabot** opens update PRs every week: one grouped PR for minor and patch Gradle updates, one for GitHub
+  Actions, one for the Terraform provider. CI decides whether each is safe to merge. Upgrades that are migrations
+  rather than bumps, Spring Boot 4 and AWS provider 6, are excluded.
+- **CodeQL** scans the Java code on every PR, on `main`, and every Monday, so new queries also run against code
+  that hasn't changed.
 
 ## Configuration
 
