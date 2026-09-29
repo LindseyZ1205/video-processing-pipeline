@@ -5,7 +5,7 @@ terraform {
     aws = {
       source = "hashicorp/aws"
       # Kept on 5.x to match the LocalStack 4.6 image that CI applies this configuration to.
-      version = "~> 5.100"
+      version = "~> 6.66"
     }
   }
 }
