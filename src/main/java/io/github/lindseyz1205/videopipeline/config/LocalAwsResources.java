@@ -43,8 +43,8 @@ import software.amazon.awssdk.services.sqs.model.SetQueueAttributesRequest;
 
 /**
  * Creates the pipeline's AWS resources in LocalStack, so {@code docker compose up} plus {@code bootRun} is enough to
- * try the service and the integration tests run against the same setup. In a real AWS account these resources
- * belong in infrastructure code (Terraform, CDK), not in the application.
+ * try the service and the integration tests run against the same setup. In a real AWS account they come from
+ * {@code infra/terraform} instead, and CI checks that path separately.
  */
 @Component
 @ConditionalOnProperty(prefix = "pipeline.aws", name = "bootstrap-resources", havingValue = "true")

@@ -11,7 +11,7 @@ the worker is idempotent: it retries transient failures and leaves poison messag
 Everything runs locally on [LocalStack](https://github.com/localstack/localstack). The integration tests run the
 whole flow against it with Testcontainers.
 
-**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), LocalStack, Testcontainers, GitHub Actions.
+**Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Terraform, LocalStack, Testcontainers, GitHub Actions.
 
 ## Architecture
 
@@ -191,6 +191,23 @@ For real transcriptions:
 OPENAI_API_KEY=sk-... ./gradlew bootRun --args='--spring.profiles.active=local --pipeline.transcription.provider=openai'
 ```
 
+## Infrastructure
+
+[`infra/terraform`](infra/terraform) defines everything the service needs in AWS:
+
+- the upload bucket: private, encrypted, with a CORS rule for browser uploads and a lifecycle rule;
+- the S3 → SQS notification, plus the queue policy that allows it;
+- the event queue and its dead-letter queue;
+- the jobs table with TTL;
+- a least-privilege IAM policy for the service's role.
+
+The service is configured entirely from one Terraform output, `service_environment`.
+
+CI applies this configuration to LocalStack on every push. It then starts the service with only the Terraform
+outputs, with the in-app bootstrap turned off, and runs [`scripts/smoke-test.sh`](scripts/smoke-test.sh): request an
+upload, PUT a file, wait for the transcript. That tests the infrastructure code and the service against each other,
+not only each one on its own. [infra/terraform/README.md](infra/terraform/README.md) explains how to apply it to AWS.
+
 ## Tests
 
 ```bash
@@ -210,6 +227,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event.
 - `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server.
 - `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys) and key sanitizing.
+- The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
+  LocalStack, and runs the smoke test against the service configured from the Terraform outputs.
 
 ## Configuration
 
@@ -229,8 +248,9 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |
 
-Against real AWS, leave the endpoint empty. The SDK then uses its default credential chain, and the resources should
-come from infrastructure code instead of `bootstrap-resources`.
+Against real AWS, leave the endpoint empty so the SDK uses its default credential chain. The resource names come
+from `terraform output -json service_environment` ([Infrastructure](#infrastructure)), not from `bootstrap-resources`.
+Environment variables such as `PIPELINE_BUCKET` override any of these settings.
 
 ## Project layout
 
@@ -241,6 +261,8 @@ src/main/java/io/github/lindseyz1205/videopipeline/
 ├── job/            job state and leases in DynamoDB
 ├── transcription/  TranscriptionService and its fake / OpenAI providers
 └── config/         AWS clients, settings, LocalStack bootstrap
+infra/terraform/    AWS resources and the service's IAM policy
+scripts/            end-to-end smoke test
 ```
 
 ## Not covered yet
@@ -248,8 +270,8 @@ src/main/java/io/github/lindseyz1205/videopipeline/
 - **Authentication.** `userId` comes from the request body. A real service would take it from the caller's identity.
 - **Long transcriptions.** The worker should keep extending the message visibility while it works (a heartbeat),
   instead of relying on one fixed timeout.
-- **Infrastructure as code.** In AWS, the bucket, queues, notification, table and IAM policies (including the queue
-  policy that lets S3 send to SQS) would be provisioned with Terraform or CDK.
+- **Deployment.** Terraform covers the resources the service uses, not where the service runs. There is no container
+  image, no compute (ECS, App Runner) and no remote Terraform state yet.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.
 - **Observability.** Metrics and alarms on queue age and dead-letter queue depth.
 

@@ -14,3 +14,9 @@ out/
 # LocalStack state if you mount a volume
 volume/
 .localstack/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+localstack_providers_override.tf

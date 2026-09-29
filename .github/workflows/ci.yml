@@ -33,3 +33,62 @@ jobs:
           path: |
             build/reports/tests/test/
             build/test-results/test/
+
+  # Provision the real infrastructure code into LocalStack, then run the service on it the way it would run in AWS:
+  # no bootstrap, configured only through the Terraform outputs.
+  infrastructure:
+    name: terraform + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      localstack:
+        image: localstack/localstack:4.6.0
+        ports:
+          - 4566:4566
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -diff -recursive infra/terraform
+
+      - name: Install tflocal
+        run: pipx install terraform-local==0.26.0
+
+      - name: Wait for LocalStack
+        run: timeout 120 bash -c 'until curl -fsS http://localhost:4566/_localstack/health > /dev/null; do sleep 2; done'
+
+      - name: Apply Terraform to LocalStack
+        working-directory: infra/terraform
+        run: |
+          tflocal init -input=false
+          tflocal validate
+          tflocal apply -auto-approve -input=false
+          terraform output -json service_environment | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
+
+      - name: Start the service
+        env:
+          PIPELINE_AWS_ENDPOINT: http://localhost:4566
+          PIPELINE_AWS_ACCESSKEY: test
+          PIPELINE_AWS_SECRETKEY: test
+        run: |
+          ./gradlew bootJar --no-daemon
+          nohup java -jar build/libs/video-processing-pipeline-0.1.0.jar > service.log 2>&1 &
+          timeout 120 bash -c 'until curl -fsS http://localhost:8080/actuator/health | grep -q UP; do sleep 2; done'
+
+      - name: Smoke test
+        run: ./scripts/smoke-test.sh
+
+      - name: Service log
+        if: always()
+        run: cat service.log || true
