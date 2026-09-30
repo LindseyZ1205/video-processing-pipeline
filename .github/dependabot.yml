@@ -28,6 +28,8 @@ updates:
     schedule:
       interval: weekly
     ignore:
-      # CI applies the configuration to LocalStack 4.6; moving to provider 6.x is a deliberate upgrade.
+      # CI applies the configuration to LocalStack 4.6, and provider 6.x fails against it (see #5), so moving to 6.x
+      # is a deliberate upgrade. The ignore is a version range and not update-types, because there is no lock file:
+      # Dependabot doesn't know the current version, so it can't tell that 6.x is a major update.
       - dependency-name: "hashicorp/aws"
-        update-types: ["version-update:semver-major"]
+        versions: [">= 6.0"]
