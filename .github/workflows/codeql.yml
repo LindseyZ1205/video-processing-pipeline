@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Same policy as CI: a new push to a PR cancels that PR's analysis still in progress.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: analyze (java-kotlin)
