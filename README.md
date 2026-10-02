@@ -275,7 +275,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
   service's Prometheus metrics and JSON logs.
 - The `docker compose + smoke test` CI job builds the image, starts the stack with `docker compose up`, and runs the
-  same smoke test. On `main` it then publishes the image to GHCR.
+  same smoke test. On `main` it then publishes the image to GHCR. Runs on `main` never overlap, so `latest` is always
+  the image of the newest commit.
 
 Each CI run puts line and branch coverage (JaCoCo, unit and integration tests combined) in the run summary, and
 uploads the HTML report as the `coverage-report` artifact.

@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# One run per branch at a time, and a newer push replaces a run that is still waiting. On PRs the newer push also
+# cancels the run in progress. On main nothing is cancelled midway, but runs never overlap, so the image tagged
+# `latest` always comes from the newest commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
