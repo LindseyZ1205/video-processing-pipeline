@@ -281,11 +281,20 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 Each CI run puts line and branch coverage (JaCoCo, unit and integration tests combined) in the run summary, and
 uploads the HTML report as the `coverage-report` artifact.
 
+### How changes reach `main`
+
+- **Branch protection.** Nothing merges into `main` unless four checks have passed on the pull request: `build`,
+  `terraform + smoke test`, `docker compose + smoke test` and `analyze (java-kotlin)`. The rule applies to admins
+  too, and `main` can't be force-pushed or deleted.
+- **Auto-merge.** A pull request set to auto-merge lands as soon as those checks pass, and GitHub then deletes its
+  branch. If a check fails, the pull request stays open until a fix turns it green.
+
 ### Keeping it current
 
 - **Dependabot** opens update PRs every week: one grouped PR for minor and patch Gradle updates, one for GitHub
   Actions, one for the Terraform provider. CI decides whether each is safe to merge. Upgrades that are migrations
-  rather than bumps, Spring Boot 4 and AWS provider 6, are excluded.
+  rather than bumps, Spring Boot 4 and AWS provider 6, are excluded. Dependabot alerts are on too: a known
+  vulnerability in a dependency raises an alert and gets a fix PR.
 - **CodeQL** scans the Java code on every PR, on `main`, and every Monday, so new queries also run against code
   that hasn't changed.
 
