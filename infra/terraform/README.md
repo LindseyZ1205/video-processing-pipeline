@@ -27,7 +27,15 @@ Before a team shares this, configure a remote state backend (an S3 bucket, for e
 a local file.
 
 The provider is pinned to the 5.x line. That matches the LocalStack 4.6 image that CI applies this configuration to.
-Moving to 6.x means bumping the pin and letting CI run.
+`.terraform.lock.hcl` records the exact version, 5.100.0, with its checksums for Linux, macOS and Windows, so every
+`terraform init` installs the same verified build. After changing the provider version, regenerate it:
+
+```bash
+terraform providers lock -platform=linux_amd64 -platform=linux_arm64 \
+  -platform=darwin_amd64 -platform=darwin_arm64 -platform=windows_amd64
+```
+
+Moving to 6.x means bumping the pin, re-locking, and letting CI run.
 
 ## Try it on LocalStack
 
