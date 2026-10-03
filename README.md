@@ -277,6 +277,15 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 - The `docker compose + smoke test` CI job builds the image, starts the stack with `docker compose up`, and runs the
   same smoke test. On `main` it then publishes the image to GHCR. Runs on `main` never overlap, so `latest` is always
   the image of the newest commit.
+- The same job then runs a browser test ([`e2e/tests/upload.spec.ts`](e2e/tests/upload.spec.ts)). Playwright opens
+  the demo page in Chromium, picks a file, and waits for the transcript. That covers what the API smoke test can't:
+  the page's JavaScript, and the browser's cross-origin PUT straight to S3, which breaks if CORS or the presigned
+  URL's address is wrong. To run it against a local stack:
+
+  ```bash
+  docker compose up --build -d
+  cd e2e && npm ci && npx playwright install chromium && npx playwright test
+  ```
 
 Each CI run puts line and branch coverage (JaCoCo, unit and integration tests combined) in the run summary, and
 uploads the HTML report as the `coverage-report` artifact.
@@ -292,7 +301,7 @@ uploads the HTML report as the `coverage-report` artifact.
 ### Keeping it current
 
 - **Dependabot** opens update PRs every week: one grouped PR for minor and patch Gradle updates, one for GitHub
-  Actions, one for the Terraform provider. CI decides whether each is safe to merge. Upgrades that are migrations
+  Actions, one for the Terraform provider, and one for Playwright. CI decides whether each is safe to merge. Upgrades that are migrations
   rather than bumps, Spring Boot 4 and AWS provider 6, are excluded. Dependabot alerts are on too: a known
   vulnerability in a dependency raises an alert and gets a fix PR.
 - **CodeQL** scans the Java code on every PR, on `main`, and every Monday, so new queries also run against code
@@ -333,6 +342,7 @@ src/main/java/io/github/lindseyz1205/videopipeline/
 └── config/         AWS clients, settings, LocalStack bootstrap
 infra/terraform/    AWS resources and the service's IAM policy
 scripts/            end-to-end smoke test
+e2e/                browser test of the demo page (Playwright)
 ```
 
 ## Not covered yet

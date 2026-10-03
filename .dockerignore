@@ -5,6 +5,7 @@
 .idea
 .vscode
 build
+e2e
 infra
 scripts
 *.md

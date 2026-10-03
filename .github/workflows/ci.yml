@@ -148,6 +148,29 @@ jobs:
       - name: Smoke test
         run: ./scripts/smoke-test.sh
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      # Drives the demo page in Chromium, the way a visitor first tries the project (e2e/tests/upload.spec.ts).
+      - name: Browser test
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+
       - name: Service log
         if: always()
         run: docker compose logs --no-color app
