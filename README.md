@@ -14,6 +14,11 @@ whole flow against it with Testcontainers.
 
 **Stack:** Java 17, Spring Boot 3.5, AWS SDK for Java v2 (S3, SQS, DynamoDB), Micrometer + Prometheus, Terraform, Docker, LocalStack, Testcontainers, GitHub Actions.
 
+<img src="docs/demo.png" width="688" alt="The demo page after an upload. The log lists each step, from requesting the upload URL to the completed job, and the transcript is shown below it.">
+
+*The demo page after an upload, run with `docker compose up --build` and opened at http://localhost:8080. The
+transcript comes from the default fake provider. The browser test in CI took this screenshot.*
+
 ## Architecture
 
 ```mermaid
@@ -280,7 +285,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 - The same job then runs a browser test ([`e2e/tests/upload.spec.ts`](e2e/tests/upload.spec.ts)). Playwright opens
   the demo page in Chromium, picks a file, and waits for the transcript. That covers what the API smoke test can't:
   the page's JavaScript, and the browser's cross-origin PUT straight to S3, which breaks if CORS or the presigned
-  URL's address is wrong. To run it against a local stack:
+  URL's address is wrong. It also takes the screenshot at the top of this README, `docs/demo.png`, and every run
+  uploads a fresh copy as the `demo-screenshot` artifact. To run it against a local stack:
 
   ```bash
   docker compose up --build -d
