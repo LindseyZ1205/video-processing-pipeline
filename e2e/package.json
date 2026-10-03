@@ -1,0 +1,11 @@
+{
+  "name": "video-processing-pipeline-e2e",
+  "private": true,
+  "description": "Browser test for the demo page, run against the docker compose stack",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

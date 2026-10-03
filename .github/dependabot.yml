@@ -33,3 +33,8 @@ updates:
       # the lock file existed it couldn't, and an update-types rule let #5 through.
       - dependency-name: "hashicorp/aws"
         versions: [">= 6.0"]
+
+  - package-ecosystem: npm
+    directory: /e2e
+    schedule:
+      interval: weekly
