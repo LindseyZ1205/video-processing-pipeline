@@ -162,6 +162,12 @@ jobs:
           npx playwright install --with-deps chromium
           npx playwright test
 
+      - name: Upload demo screenshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-screenshot
+          path: e2e/screenshots/demo.png
+
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v7
