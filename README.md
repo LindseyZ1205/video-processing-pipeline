@@ -235,18 +235,17 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 | `pipeline_queue_messages{queue,state}` | gauge | Visible and in-flight messages on the event queue and the dead-letter queue, refreshed every 30 s |
 | `pipeline_sqs_receive_errors_total` | counter | Failed polls of SQS |
 
-Alerts would be built on queries like these:
+[`monitoring/alerts.yml`](monitoring/alerts.yml) turns these metrics into Prometheus alert rules:
 
-```promql
-# Anything in the dead-letter queue needs a person to look at it
-pipeline_queue_messages{queue="dead-letter", state="visible"} > 0
+| Alert | Fires when | Severity |
+|---|---|---|
+| `UploadEventsInDeadLetterQueue` | a message has sat in the dead-letter queue for 5 minutes | page |
+| `UploadEventsFailing` | more than 10% of attempts failed, for 10 minutes | warn |
+| `SlowUploadPickup` | the p95 time from upload to pickup stays above 2 minutes, for 10 minutes | warn |
+| `WorkerCannotReachSqs` | polling SQS keeps failing, for 10 minutes | page |
 
-# Share of attempts that failed over the last 5 minutes
-sum(rate(pipeline_events_total{outcome="failed"}[5m])) / sum(rate(pipeline_events_total[5m]))
-
-# 95th percentile of the time from upload to pickup
-histogram_quantile(0.95, sum by (le) (rate(pipeline_events_lag_seconds_bucket[5m])))
-```
+Each rule has unit tests in [`monitoring/alerts.test.yml`](monitoring/alerts.test.yml): synthetic series where it
+must fire, and where it must stay quiet. CI runs `promtool check rules` and `promtool test rules` in the `build` job.
 
 Log lines about a message or a job carry its `messageId` and `jobId` in the MDC. With
 `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` every line is JSON with those IDs as separate fields, so one upload's whole
@@ -349,6 +348,7 @@ src/main/java/io/github/lindseyz1205/videopipeline/
 infra/terraform/    AWS resources and the service's IAM policy
 scripts/            end-to-end smoke test
 e2e/                browser test of the demo page (Playwright)
+monitoring/         Prometheus alert rules and their unit tests
 ```
 
 ## Not covered yet
@@ -359,8 +359,8 @@ e2e/                browser test of the demo page (Playwright)
 - **Deployment.** Terraform covers the resources the service uses, and there is a container image, but nothing runs
   the image yet: no compute (ECS, App Runner) and no remote Terraform state.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.
-- **Dashboards and alerts.** The metrics and example queries are here, but no Grafana dashboard or alert rules are
-  checked in.
+- **Dashboards and alert routing.** The alert rules are tested, but there's no Grafana dashboard, and no Alertmanager
+  configuration decides who gets paged.
 
 ## License
 

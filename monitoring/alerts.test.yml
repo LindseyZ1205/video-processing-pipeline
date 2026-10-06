@@ -1,0 +1,129 @@
+# Unit tests for alerts.yml. Run with: promtool test rules alerts.test.yml
+# Every rule is tested twice: once where it should fire, once where it should stay quiet.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: a message in the dead-letter queue pages after 5 minutes
+    interval: 1m
+    input_series:
+      - series: 'pipeline_queue_messages{queue="dead-letter", state="visible"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'pipeline_queue_messages{queue="events", state="visible"}'
+        values: '5 5 5 5 5 5 5 5 5 5 5'
+    alert_rule_test:
+      # Visible since minute 2, so still pending at minute 5.
+      - eval_time: 5m
+        alertname: UploadEventsInDeadLetterQueue
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: UploadEventsInDeadLetterQueue
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: Upload events are waiting in the dead-letter queue
+              description: 1 upload event(s) failed processing too many times. Check the job's lastError, fix the cause, then redrive the dead-letter queue.
+
+  - name: a backlog on the event queue alone is not a dead-letter alert
+    interval: 1m
+    input_series:
+      - series: 'pipeline_queue_messages{queue="dead-letter", state="visible"}'
+        values: '0+0x20'
+      - series: 'pipeline_queue_messages{queue="events", state="visible"}'
+        values: '50+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: UploadEventsInDeadLetterQueue
+        exp_alerts: []
+
+  - name: a third of attempts failing warns
+    interval: 1m
+    input_series:
+      - series: 'pipeline_events_total{outcome="processed"}'
+        values: '0+10x30'
+      - series: 'pipeline_events_total{outcome="failed"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: UploadEventsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+            exp_annotations:
+              summary: More than 10% of upload event attempts are failing
+
+  - name: an occasional failure stays quiet
+    interval: 1m
+    input_series:
+      - series: 'pipeline_events_total{outcome="processed"}'
+        values: '0+100x30'
+      - series: 'pipeline_events_total{outcome="failed"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: UploadEventsFailing
+        exp_alerts: []
+
+  # Each minute: 1 pickup within 30 s, 1 more within 120 s, 8 more within 300 s, so p95 is about 290 s.
+  - name: slow pickups warn
+    interval: 1m
+    input_series:
+      - series: 'pipeline_events_lag_seconds_bucket{le="30"}'
+        values: '0+1x30'
+      - series: 'pipeline_events_lag_seconds_bucket{le="120"}'
+        values: '0+2x30'
+      - series: 'pipeline_events_lag_seconds_bucket{le="300"}'
+        values: '0+10x30'
+      - series: 'pipeline_events_lag_seconds_bucket{le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SlowUploadPickup
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+            exp_annotations:
+              summary: Uploads wait more than 2 minutes (p95) before a worker starts on them
+
+  - name: fast pickups stay quiet
+    interval: 1m
+    input_series:
+      - series: 'pipeline_events_lag_seconds_bucket{le="30"}'
+        values: '0+10x30'
+      - series: 'pipeline_events_lag_seconds_bucket{le="120"}'
+        values: '0+10x30'
+      - series: 'pipeline_events_lag_seconds_bucket{le="300"}'
+        values: '0+10x30'
+      - series: 'pipeline_events_lag_seconds_bucket{le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SlowUploadPickup
+        exp_alerts: []
+
+  - name: SQS polls failing for 10 minutes page
+    interval: 1m
+    input_series:
+      - series: 'pipeline_sqs_receive_errors_total'
+        values: '0+2x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WorkerCannotReachSqs
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: The worker has been failing to poll SQS for 10 minutes
+
+  - name: no receive errors stay quiet
+    interval: 1m
+    input_series:
+      - series: 'pipeline_sqs_receive_errors_total'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WorkerCannotReachSqs
+        exp_alerts: []

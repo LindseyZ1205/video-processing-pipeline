@@ -1,0 +1,41 @@
+# Prometheus alert rules for the metrics the service exports at /actuator/prometheus.
+# CI runs `promtool check rules` on this file and the unit tests in alerts.test.yml.
+groups:
+  - name: video-processing-pipeline
+    rules:
+      - alert: UploadEventsInDeadLetterQueue
+        expr: max(pipeline_queue_messages{queue="dead-letter", state="visible"}) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Upload events are waiting in the dead-letter queue
+          description: >-
+            {{ $value }} upload event(s) failed processing too many times. Check the job's lastError, fix the cause,
+            then redrive the dead-letter queue.
+
+      - alert: UploadEventsFailing
+        expr: |
+          sum(rate(pipeline_events_total{outcome="failed"}[10m]))
+            / sum(rate(pipeline_events_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: More than 10% of upload event attempts are failing
+
+      - alert: SlowUploadPickup
+        expr: histogram_quantile(0.95, sum by (le) (rate(pipeline_events_lag_seconds_bucket[10m]))) > 120
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: Uploads wait more than 2 minutes (p95) before a worker starts on them
+
+      - alert: WorkerCannotReachSqs
+        expr: sum(rate(pipeline_sqs_receive_errors_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: The worker has been failing to poll SQS for 10 minutes

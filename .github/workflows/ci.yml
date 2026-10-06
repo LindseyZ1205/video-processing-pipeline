@@ -22,6 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The alert rules must parse, and their unit tests (monitoring/alerts.test.yml) must pass.
+      - name: Check and test the alert rules
+        run: |
+          promtool() { docker run --rm --entrypoint promtool -v "$PWD/monitoring:/rules:ro" -w /rules prom/prometheus:v3.15.0 "$@"; }
+          promtool check rules alerts.yml
+          promtool test rules alerts.test.yml
+
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
