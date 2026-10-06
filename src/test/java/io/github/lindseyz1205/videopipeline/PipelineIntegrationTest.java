@@ -159,6 +159,15 @@ class PipelineIntegrationTest {
     }
 
     @Test
+    void documentsTheApiWithOpenApi() {
+        String spec = api.getForObject("/v3/api-docs", String.class);
+
+        assertThat(spec).contains("Video processing pipeline API", "\"/api/uploads\"", "\"/api/uploads/{uploadId}\"");
+        assertThat(spec).doesNotContain("/actuator");
+        assertThat(api.getForEntity("/swagger-ui/index.html", String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
     void refusesFilesThatCannotBeTranscribed() {
         var request = new CreateUploadRequest("test-user", "notes.pdf", "application/pdf", 1_000);
 
