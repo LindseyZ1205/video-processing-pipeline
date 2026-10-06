@@ -302,7 +302,9 @@ uploads the HTML report as the `coverage-report` artifact.
   `terraform + smoke test`, `docker compose + smoke test` and `analyze (java-kotlin)`. The rule applies to admins
   too, and `main` can't be force-pushed or deleted.
 - **Auto-merge.** A pull request set to auto-merge lands as soon as those checks pass, and GitHub then deletes its
-  branch. If a check fails, the pull request stays open until a fix turns it green.
+  branch. If a check fails, the pull request stays open until a fix turns it green. Dependabot's pull requests turn
+  auto-merge on by themselves ([`dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml)), so an
+  update that passes CI lands without anyone clicking anything.
 
 ### Keeping it current
 
