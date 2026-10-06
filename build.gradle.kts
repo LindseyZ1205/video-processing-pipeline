@@ -27,7 +27,7 @@ dependencies {
     implementation("io.micrometer:micrometer-registry-prometheus")
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.9.1")
 
-    implementation(platform("software.amazon.awssdk:bom:2.55.9"))
+    implementation(platform("software.amazon.awssdk:bom:2.55.11"))
     implementation("software.amazon.awssdk:s3")
     implementation("software.amazon.awssdk:sqs")
     implementation("software.amazon.awssdk:dynamodb")
