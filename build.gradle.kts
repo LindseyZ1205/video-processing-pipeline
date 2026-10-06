@@ -25,6 +25,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("io.micrometer:micrometer-registry-prometheus")
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.9.1")
 
     implementation(platform("software.amazon.awssdk:bom:2.55.9"))
     implementation("software.amazon.awssdk:s3")

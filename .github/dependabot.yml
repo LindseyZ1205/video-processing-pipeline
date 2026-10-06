@@ -14,6 +14,9 @@ updates:
       # Spring Boot 4 is a migration, not a routine bump.
       - dependency-name: "org.springframework.boot"
         update-types: ["version-update:semver-major"]
+      # springdoc 3 is built for Spring Boot 4.
+      - dependency-name: "org.springdoc:*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

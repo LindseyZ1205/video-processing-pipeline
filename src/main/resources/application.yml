@@ -43,6 +43,10 @@ pipeline:
   metrics:
     queue-depth-interval: 30s
 
+# API docs: /swagger-ui.html (OpenAPI JSON at /v3/api-docs). Only the pipeline's own API, not actuator.
+springdoc:
+  paths-to-match: /api/**
+
 management:
   endpoints:
     web:

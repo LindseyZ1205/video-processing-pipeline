@@ -129,6 +129,9 @@ block a worker thread while it runs.
 
 ## API
 
+Interactive docs: with the service running, open <http://localhost:8080/swagger-ui.html>. springdoc generates the
+OpenAPI document from the code, so the docs can't drift from the endpoints. The raw JSON is at `/v3/api-docs`.
+
 **Create an upload**
 
 ```http
