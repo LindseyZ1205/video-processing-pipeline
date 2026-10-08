@@ -12,11 +12,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -32,15 +34,20 @@ import software.amazon.awssdk.services.sqs.model.ChangeMessageVisibilityRequest;
 class HeartbeatTest {
 
     private static final Lease LEASE = new Lease("0f8fad5b-d9cb-469f-a165-70867728950e", "token-1", 1);
+    private static final Instant START = Instant.parse("2026-10-08T12:00:00Z");
+    // Messages and leases last 60 s, beats come every 20 s, and the heartbeat gives up after 15 minutes.
+    private static final PipelineProperties.Worker SETTINGS = new PipelineProperties.Worker(true, 1, 1,
+            Duration.ofSeconds(10), Duration.ofSeconds(60), Duration.ofSeconds(20), Duration.ofMinutes(15));
 
     private final SqsClient sqs = mock(SqsClient.class);
     private final JobStore jobs = mock(JobStore.class);
     private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     private final ScheduledFuture<?> beats = mock(ScheduledFuture.class);
+    private final Clock clock = clockAt(START);
     private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
     private final Heartbeat heartbeat = new Heartbeat(sqs, jobs, new PipelineMetrics(metrics, Clock.systemUTC()),
-            scheduler, "https://sqs.us-east-1.amazonaws.com/000000000000/video-upload-events", "receipt-1",
-            Duration.ofSeconds(60), Duration.ofSeconds(20));
+            scheduler, clock, SETTINGS, "https://sqs.us-east-1.amazonaws.com/000000000000/video-upload-events",
+            "receipt-1");
 
     @BeforeEach
     void leasesCanBeExtended() {
@@ -119,6 +126,21 @@ class HeartbeatTest {
     }
 
     @Test
+    void givesUpOnWorkThatRunsPastTheMaxProcessingTime() {
+        heartbeat.keepAlive(LEASE);
+        heartbeat.beat();
+
+        when(clock.instant()).thenReturn(START.plus(Duration.ofMinutes(15)));
+        heartbeat.beat();
+        heartbeat.beat();
+
+        verify(beats).cancel(false);
+        verify(sqs, times(1)).changeMessageVisibility(any(ChangeMessageVisibilityRequest.class));
+        verify(jobs, times(1)).extendLease(LEASE);
+        assertThat(leaseExtensions("abandoned")).isEqualTo(1);
+    }
+
+    @Test
     void cannotBeRestartedAfterClosing() {
         heartbeat.close();
 
@@ -130,5 +152,11 @@ class HeartbeatTest {
 
     private double leaseExtensions(String outcome) {
         return metrics.get("pipeline.lease.extensions").tag("outcome", outcome).counter().count();
+    }
+
+    private static Clock clockAt(Instant instant) {
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenReturn(instant);
+        return clock;
     }
 }

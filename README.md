@@ -113,6 +113,9 @@ tolerate it.
   heartbeat stops as soon as the attempt ends. A failed attempt therefore still comes back after the normal
   visibility timeout, and a crashed worker simply stops beating. If an extension finds the lease already lost, the
   heartbeat stops too.
+- But not forever. After `max-processing-time` (15 min) the heartbeat gives up, because a transcription that hangs
+  would otherwise hold its job indefinitely. Its lease then runs out, and the next delivery takes the job over.
+  Requests to OpenAI time out after 5 minutes, so a stalled request normally fails well before that.
 - After `maxReceiveCount` (3) deliveries, SQS moves the message to the dead-letter queue. From there it can be
   inspected, and redriven once the cause is fixed.
 - Failures that a retry can't fix, like a file over the size limit or a format the provider rejects, mark the job
@@ -243,7 +246,7 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 | `pipeline_events_lag_seconds` | histogram | From the upload finishing to a worker starting on it: queueing plus retry delays |
 | `pipeline_queue_messages{queue,state}` | gauge | Visible and in-flight messages on the event queue and the dead-letter queue, refreshed every 30 s |
 | `pipeline_sqs_receive_errors_total` | counter | Failed polls of SQS |
-| `pipeline_lease_extensions_total{outcome}` | counter | Heartbeat attempts to extend a job's lease: `extended`, `lost` (another worker had taken the job over) or `failed` (the DynamoDB call errored) |
+| `pipeline_lease_extensions_total{outcome}` | counter | Heartbeat attempts to extend a job's lease: `extended`, `lost` (another worker had taken the job over), `failed` (the DynamoDB call errored) or `abandoned` (the work ran past `max-processing-time`) |
 
 [`monitoring/alerts.yml`](monitoring/alerts.yml) turns these metrics into Prometheus alert rules:
 
@@ -280,16 +283,18 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - an event that keeps failing lands in the dead-letter queue after 3 attempts;
   - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
     and the lease extensions show up in the metrics with none lost;
+  - a transcription that hangs is given up on after `max-processing-time`, and the next delivery completes the job;
   - the Prometheus endpoint reports the pipeline's metrics.
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate, lease held
   elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event. It also checks
   the metric that each case records, and that a lease is kept alive only while the file is being transcribed.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
-  work ends or the lease is lost. It also checks the outcome each extension records, including when DynamoDB can't
-  be reached.
+  work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
+  each extension records, including when DynamoDB can't be reached.
 - `QueueDepthGaugesTest` checks the queue depth gauges, including that they keep their last value while SQS is
   unreachable.
-- `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server.
+- `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server,
+  and that a request that never gets an answer times out.
 - `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys) and key sanitizing.
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
@@ -347,8 +352,10 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.worker.concurrency` | `2` | Poller threads |
 | `pipeline.worker.visibility-timeout` | `60s` | Retry delay, and how long a crashed worker's job stays claimed |
 | `pipeline.worker.heartbeat-interval` | `20s` | How often running work extends its message and lease; shorter than the visibility timeout |
+| `pipeline.worker.max-processing-time` | `15m` | When the heartbeat gives up on an attempt, so a hung one gets taken over; longer than the visibility timeout |
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |
+| `pipeline.transcription.openai.timeout` | `5m` | How long to wait for OpenAI's answer before the attempt fails and SQS retries it |
 | `pipeline.metrics.queue-depth-interval` | `30s` | How often the queue depth gauges are read from SQS |
 
 Against real AWS, leave the endpoint empty so the SDK uses its default credential chain. The resource names come

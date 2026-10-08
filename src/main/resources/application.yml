@@ -36,12 +36,16 @@ pipeline:
     visibility-timeout: 60s
     # While a job runs, its message and lease are extended this often, so long transcriptions keep their claim.
     heartbeat-interval: 20s
+    # The heartbeat gives up on work that runs longer, so a hung attempt's lease runs out and SQS retries the job.
+    max-processing-time: 15m
   transcription:
     provider: fake # fake | openai
     openai:
       api-key: ${OPENAI_API_KEY:}
       model: whisper-1
       base-url: https://api.openai.com/v1
+      # How long to wait for the transcript of one file. Keep it well under pipeline.worker.max-processing-time.
+      timeout: 5m
   metrics:
     queue-depth-interval: 30s
 

@@ -49,14 +49,21 @@ public record PipelineProperties(
      *                          the job, so when a crashed worker's message reappears the next delivery can take over.
      * @param heartbeatInterval how often a job that's still running extends both its message's visibility and its
      *                          lease. Must be shorter than the visibility timeout.
+     * @param maxProcessingTime how long the heartbeat keeps extending the work on one message. Past that it gives up,
+     *                          so a hung attempt's lease runs out and the next delivery takes the job over. Must be
+     *                          longer than the visibility timeout.
      */
     public record Worker(boolean enabled, int concurrency, int maxMessages, Duration waitTime, Duration visibilityTimeout,
-            Duration heartbeatInterval) {
+            Duration heartbeatInterval, Duration maxProcessingTime) {
     }
 
     public record Transcription(String provider, OpenAi openai) {
 
-        public record OpenAi(String apiKey, String model, String baseUrl) {
+        /**
+         * @param timeout how long to wait for the answer to one request. A request that times out fails the attempt,
+         *                and SQS retries it.
+         */
+        public record OpenAi(String apiKey, String model, String baseUrl, Duration timeout) {
         }
     }
 

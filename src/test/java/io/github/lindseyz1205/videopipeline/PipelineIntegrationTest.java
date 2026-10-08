@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,7 +40,8 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
 /**
  * The whole pipeline against LocalStack: presigned upload, S3 event notification, SQS, worker, DynamoDB. The
- * visibility timeout is cut to a few seconds so retries and the dead-letter queue show up quickly.
+ * visibility timeout and the max processing time are cut to seconds, so retries, take-overs and the dead-letter queue
+ * show up quickly.
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -47,6 +49,7 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
                 "pipeline.aws.bootstrap-resources=true",
                 "pipeline.worker.visibility-timeout=3s",
                 "pipeline.worker.heartbeat-interval=1s",
+                "pipeline.worker.max-processing-time=10s",
                 "pipeline.worker.wait-time=1s",
                 "pipeline.queue.max-receive-count=3",
                 "pipeline.metrics.queue-depth-interval=1s"
@@ -142,6 +145,26 @@ class PipelineIntegrationTest {
         String scrape = api.getForObject("/actuator/prometheus", String.class);
         assertThat(sum(scrape, "pipeline_lease_extensions_total", "outcome=\"extended\"")).isGreaterThanOrEqualTo(2);
         assertThat(sum(scrape, "pipeline_lease_extensions_total", "outcome=\"lost\"")).isZero();
+    }
+
+    @Test
+    void transcriptionThatHangsIsTakenOverAfterTheMaxProcessingTime() throws Exception {
+        CreateUploadResponse upload = createUpload("frozen.mp4");
+        // The first attempt never returns. After 10 s its heartbeat gives up, its lease runs out, and the next
+        // delivery transcribes the file instead.
+        transcriber.hangFirstCall(upload.objectKey());
+        try {
+            putFile(upload);
+
+            UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
+            assertThat(done.attempts()).isEqualTo(2);
+            assertThat(transcriber.calls(upload.objectKey())).isEqualTo(2);
+            String scrape = api.getForObject("/actuator/prometheus", String.class);
+            assertThat(sum(scrape, "pipeline_lease_extensions_total", "outcome=\"abandoned\""))
+                    .isGreaterThanOrEqualTo(1);
+        } finally {
+            transcriber.release(upload.objectKey());
+        }
     }
 
     @Test
@@ -268,12 +291,13 @@ class PipelineIntegrationTest {
         }
     }
 
-    /** Stands in for a real provider: counts calls per file, and can be told to fail or to be slow. */
+    /** Stands in for a real provider: counts calls per file, and can be told to fail, to be slow or to hang. */
     static class ScriptedTranscriptionService implements TranscriptionService {
 
         private final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
         private final Map<String, Integer> failuresLeft = new ConcurrentHashMap<>();
         private final Map<String, Duration> delays = new ConcurrentHashMap<>();
+        private final Map<String, CountDownLatch> hangs = new ConcurrentHashMap<>();
 
         void failNextCalls(String objectKey, int times) {
             failuresLeft.put(objectKey, times);
@@ -283,6 +307,18 @@ class PipelineIntegrationTest {
             delays.put(objectKey, delay);
         }
 
+        /** The first call for the file blocks until {@link #release} is called, like a request that never returns. */
+        void hangFirstCall(String objectKey) {
+            hangs.put(objectKey, new CountDownLatch(1));
+        }
+
+        void release(String objectKey) {
+            CountDownLatch hang = hangs.get(objectKey);
+            if (hang != null) {
+                hang.countDown();
+            }
+        }
+
         int calls(String objectKey) {
             AtomicInteger count = calls.get(objectKey);
             return count == null ? 0 : count.get();
@@ -290,7 +326,16 @@ class PipelineIntegrationTest {
 
         @Override
         public String transcribe(StoredObject object) {
-            calls.computeIfAbsent(object.key(), key -> new AtomicInteger()).incrementAndGet();
+            int call = calls.computeIfAbsent(object.key(), key -> new AtomicInteger()).incrementAndGet();
+            CountDownLatch hang = hangs.get(object.key());
+            if (hang != null && call == 1) {
+                try {
+                    hang.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted while simulating a hung transcription", e);
+                }
+            }
             Integer left = failuresLeft.computeIfPresent(object.key(), (key, remaining) -> remaining - 1);
             if (left != null && left >= 0) {
                 throw new IllegalStateException("simulated transcription failure");

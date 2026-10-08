@@ -1,8 +1,11 @@
 package io.github.lindseyz1205.videopipeline.processing;
 
+import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
@@ -21,6 +24,9 @@ import software.amazon.awssdk.services.sqs.model.ChangeMessageVisibilityRequest;
  * visibility timeout and extends each lease still in use. Beats start with the first lease and stop as soon as the
  * work ends, so a failed attempt still becomes visible again after the normal visibility timeout and SQS retries it
  * exactly as before.
+ *
+ * <p>Beats also stop once the message has been worked on for {@code max-processing-time}. A transcription that hangs
+ * would otherwise keep its job forever. This way its lease runs out, and the next delivery takes the job over.
  */
 class Heartbeat implements LeaseKeeper, AutoCloseable {
 
@@ -30,25 +36,31 @@ class Heartbeat implements LeaseKeeper, AutoCloseable {
     private final JobStore jobs;
     private final PipelineMetrics metrics;
     private final ScheduledExecutorService scheduler;
+    private final Clock clock;
     private final String queueUrl;
     private final String receiptHandle;
     private final Duration visibilityTimeout;
     private final Duration interval;
+    private final Duration maxProcessingTime;
+    private final Instant deadline;
     private final Set<Lease> leases = ConcurrentHashMap.newKeySet();
 
     private ScheduledFuture<?> beats;
     private volatile boolean stopped;
 
-    Heartbeat(SqsClient sqs, JobStore jobs, PipelineMetrics metrics, ScheduledExecutorService scheduler,
-            String queueUrl, String receiptHandle, Duration visibilityTimeout, Duration interval) {
+    Heartbeat(SqsClient sqs, JobStore jobs, PipelineMetrics metrics, ScheduledExecutorService scheduler, Clock clock,
+            PipelineProperties.Worker settings, String queueUrl, String receiptHandle) {
         this.sqs = sqs;
         this.jobs = jobs;
         this.metrics = metrics;
         this.scheduler = scheduler;
+        this.clock = clock;
         this.queueUrl = queueUrl;
         this.receiptHandle = receiptHandle;
-        this.visibilityTimeout = visibilityTimeout;
-        this.interval = interval;
+        this.visibilityTimeout = settings.visibilityTimeout();
+        this.interval = settings.heartbeatInterval();
+        this.maxProcessingTime = settings.maxProcessingTime();
+        this.deadline = clock.instant().plus(maxProcessingTime);
     }
 
     @Override
@@ -71,6 +83,10 @@ class Heartbeat implements LeaseKeeper, AutoCloseable {
     /** One beat: extend the message, then every lease that is still in use. */
     void beat() {
         if (stopped || leases.isEmpty()) {
+            return;
+        }
+        if (!clock.instant().isBefore(deadline)) {
+            giveUp();
             return;
         }
         try {
@@ -99,6 +115,17 @@ class Heartbeat implements LeaseKeeper, AutoCloseable {
                 log.warn("Could not extend the lease on job {}", lease.jobId(), e);
             }
         }
+    }
+
+    /** The work has run too long. Stops extending it, so its leases run out and the next delivery takes over. */
+    private void giveUp() {
+        for (Lease lease : leases) {
+            metrics.recordLeaseAbandoned();
+            log.warn("Job {} (attempt {}) ran past pipeline.worker.max-processing-time ({}); no longer extending "
+                    + "its lease, so the next delivery can take it over", lease.jobId(), lease.attempt(),
+                    maxProcessingTime);
+        }
+        close();
     }
 
     /** Stops the beats. Safe to call more than once. */
