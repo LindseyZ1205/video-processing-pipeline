@@ -132,6 +132,26 @@ public class DynamoDbJobStore implements JobStore {
     }
 
     @Override
+    public boolean extendLease(Lease lease) {
+        Map<String, AttributeValue> values = new HashMap<>();
+        values.put(":token", s(lease.token()));
+        values.put(":leaseExpiresAt", n(clock.instant().plus(leaseDuration).toEpochMilli()));
+        try {
+            dynamo.updateItem(UpdateItemRequest.builder()
+                    .tableName(table)
+                    .key(key(lease.jobId()))
+                    .conditionExpression("#leaseToken = :token")
+                    .updateExpression("SET #leaseExpiresAt = :leaseExpiresAt")
+                    .expressionAttributeNames(names(LEASE_TOKEN, LEASE_EXPIRES_AT))
+                    .expressionAttributeValues(values)
+                    .build());
+            return true;
+        } catch (ConditionalCheckFailedException e) {
+            return false; // the caller decides how to report it
+        }
+    }
+
+    @Override
     public boolean complete(Lease lease, String transcript) {
         Map<String, AttributeValue> values = new HashMap<>();
         values.put(":token", s(lease.token()));

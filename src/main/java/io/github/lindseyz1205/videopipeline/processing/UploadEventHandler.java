@@ -43,12 +43,18 @@ public class UploadEventHandler {
         this.maxFileSizeBytes = maxFileSize.toBytes();
     }
 
+    /** {@link #handle(String, LeaseKeeper)} without keeping leases alive: each lease runs for its initial length. */
+    public boolean handle(String messageBody) {
+        return handle(messageBody, LeaseKeeper.NONE);
+    }
+
     /**
+     * @param leases told when work on a job starts and ends, so the caller can keep the job's lease alive meanwhile
      * @return true when the message is fully handled and can be deleted; false to leave it on the queue so SQS
      *         delivers it again after the visibility timeout (and eventually moves it to the dead-letter queue)
      * @throws RuntimeException if the job store or S3 is unreachable. The message stays on the queue in that case too.
      */
-    public boolean handle(String messageBody) {
+    public boolean handle(String messageBody, LeaseKeeper leases) {
         S3EventNotification notification = S3EventNotification.parse(messageBody);
         if (notification.isTestEvent()) {
             log.info("Ignoring the s3:TestEvent sent when the bucket notification was configured");
@@ -56,14 +62,14 @@ public class UploadEventHandler {
         }
         boolean deleteMessage = true;
         for (S3EventNotification.EventRecord record : notification.records()) {
-            EventOutcome outcome = process(record);
+            EventOutcome outcome = process(record, leases);
             metrics.recordOutcome(outcome);
             deleteMessage &= outcome.deletesMessage();
         }
         return deleteMessage;
     }
 
-    private EventOutcome process(S3EventNotification.EventRecord record) {
+    private EventOutcome process(S3EventNotification.EventRecord record, LeaseKeeper leases) {
         if (!record.isObjectCreated()) {
             log.warn("Ignoring unexpected event {}", record.eventName());
             return EventOutcome.IGNORED;
@@ -77,11 +83,12 @@ public class UploadEventHandler {
         String jobId = upload.get().uploadId();
         // Every log line about this job carries its ID (a field of its own in structured logs).
         try (MDC.MDCCloseable ignored = MDC.putCloseable("jobId", jobId)) {
-            return process(jobId, record, objectKey);
+            return process(jobId, record, objectKey, leases);
         }
     }
 
-    private EventOutcome process(String jobId, S3EventNotification.EventRecord record, String objectKey) {
+    private EventOutcome process(String jobId, S3EventNotification.EventRecord record, String objectKey,
+            LeaseKeeper leases) {
         Optional<Lease> acquired = jobs.tryAcquire(jobId, record.bucketName(), objectKey);
         if (acquired.isEmpty()) {
             if (jobs.isCompleted(jobId)) {
@@ -95,12 +102,7 @@ public class UploadEventHandler {
         Lease lease = acquired.get();
         metrics.recordLag(record.eventTime());
         try {
-            StoredObject object = describe(record.bucketName(), objectKey);
-            if (object.sizeBytes() > maxFileSizeBytes) {
-                throw new UnprocessableMediaException(
-                        "File is " + object.sizeBytes() + " bytes, over the " + maxFileSizeBytes + " byte limit");
-            }
-            String transcript = metrics.timeTranscription(() -> transcription.transcribe(object));
+            String transcript = transcribe(record.bucketName(), objectKey, lease, leases);
             if (!jobs.complete(lease, transcript)) {
                 return EventOutcome.BUSY;
             }
@@ -114,6 +116,24 @@ public class UploadEventHandler {
             log.warn("Job {} failed on attempt {}; SQS will redeliver the event", jobId, lease.attempt(), e);
             jobs.fail(lease, e.toString());
             return EventOutcome.FAILED;
+        }
+    }
+
+    /**
+     * Keeps the lease alive only while the file is being transcribed. The lease is released before the result or the
+     * failure is recorded, so a late heartbeat can't race with the write that ends it.
+     */
+    private String transcribe(String bucket, String objectKey, Lease lease, LeaseKeeper leases) {
+        leases.keepAlive(lease);
+        try {
+            StoredObject object = describe(bucket, objectKey);
+            if (object.sizeBytes() > maxFileSizeBytes) {
+                throw new UnprocessableMediaException(
+                        "File is " + object.sizeBytes() + " bytes, over the " + maxFileSizeBytes + " byte limit");
+            }
+            return metrics.timeTranscription(() -> transcription.transcribe(object));
+        } finally {
+            leases.release(lease);
         }
     }
 

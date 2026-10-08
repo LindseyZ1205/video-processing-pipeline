@@ -39,8 +39,8 @@ public class PipelineConfiguration {
     }
 
     @Bean
-    public UploadEventWorker uploadEventWorker(SqsClient sqs, UploadEventHandler handler, PipelineMetrics metrics,
-            PipelineProperties properties) {
-        return new UploadEventWorker(sqs, handler, metrics, properties.queue().name(), properties.worker());
+    public UploadEventWorker uploadEventWorker(SqsClient sqs, UploadEventHandler handler, JobStore jobs,
+            PipelineMetrics metrics, PipelineProperties properties) {
+        return new UploadEventWorker(sqs, handler, jobs, metrics, properties.queue().name(), properties.worker());
     }
 }
