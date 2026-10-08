@@ -34,6 +34,8 @@ pipeline:
     wait-time: 10s
     # Retry delay for failed messages and lease length for a job being processed.
     visibility-timeout: 60s
+    # While a job runs, its message and lease are extended this often, so long transcriptions keep their claim.
+    heartbeat-interval: 20s
   transcription:
     provider: fake # fake | openai
     openai:

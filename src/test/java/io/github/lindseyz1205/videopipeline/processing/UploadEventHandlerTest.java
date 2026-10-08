@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -21,6 +22,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.util.unit.DataSize;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
@@ -140,6 +142,47 @@ class UploadEventHandlerTest {
         assertThat(handler.handle(EVENT.replace(KEY, "transcripts/summary.txt"))).isTrue();
         verifyNoInteractions(jobs);
         assertThat(events("ignored")).isEqualTo(1);
+    }
+
+    @Test
+    void keepsTheLeaseAliveOnlyWhileTranscribing() {
+        LeaseKeeper leases = mock(LeaseKeeper.class);
+        when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY)).thenReturn(Optional.of(LEASE));
+        when(transcription.transcribe(any())).thenReturn("hello");
+        when(jobs.complete(LEASE, "hello")).thenReturn(true);
+
+        assertThat(handler.handle(EVENT, leases)).isTrue();
+
+        InOrder order = inOrder(leases, transcription, jobs);
+        order.verify(leases).keepAlive(LEASE);
+        order.verify(transcription).transcribe(any());
+        order.verify(leases).release(LEASE);
+        order.verify(jobs).complete(LEASE, "hello");
+    }
+
+    @Test
+    void releasesTheLeaseBeforeRecordingAFailure() {
+        LeaseKeeper leases = mock(LeaseKeeper.class);
+        when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY)).thenReturn(Optional.of(LEASE));
+        when(transcription.transcribe(any())).thenThrow(new IllegalStateException("provider timed out"));
+
+        assertThat(handler.handle(EVENT, leases)).isFalse();
+
+        InOrder order = inOrder(leases, jobs);
+        order.verify(leases).keepAlive(LEASE);
+        order.verify(leases).release(LEASE);
+        order.verify(jobs).fail(eq(LEASE), contains("provider timed out"));
+    }
+
+    @Test
+    void neverKeepsAliveALeaseItDidNotGet() {
+        LeaseKeeper leases = mock(LeaseKeeper.class);
+        when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY)).thenReturn(Optional.empty());
+        when(jobs.isCompleted(UPLOAD_ID)).thenReturn(false);
+
+        assertThat(handler.handle(EVENT, leases)).isFalse();
+
+        verifyNoInteractions(leases);
     }
 
     private double events(String outcome) {

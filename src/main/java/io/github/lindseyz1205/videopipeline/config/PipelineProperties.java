@@ -47,8 +47,11 @@ public record PipelineProperties(
     /**
      * @param visibilityTimeout how long a received message stays hidden from other pollers. It is also the lease on
      *                          the job, so when a crashed worker's message reappears the next delivery can take over.
+     * @param heartbeatInterval how often a job that's still running extends both its message's visibility and its
+     *                          lease. Must be shorter than the visibility timeout.
      */
-    public record Worker(boolean enabled, int concurrency, int maxMessages, Duration waitTime, Duration visibilityTimeout) {
+    public record Worker(boolean enabled, int concurrency, int maxMessages, Duration waitTime, Duration visibilityTimeout,
+            Duration heartbeatInterval) {
     }
 
     public record Transcription(String provider, OpenAi openai) {

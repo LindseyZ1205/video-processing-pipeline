@@ -107,6 +107,12 @@ tolerate it.
   and SQS redelivers it once the visibility timeout expires, so the visibility timeout doubles as the retry delay.
 - The worker sets the visibility timeout on every `ReceiveMessage` and uses the same value as the job lease. When a
   crashed worker's message reappears, its lease has already expired, so the next delivery can take over.
+- Long work keeps its claim. While a file is being transcribed, a heartbeat runs every `heartbeat-interval` (20 s).
+  Each beat resets the message's visibility timeout and extends the job lease, conditioned on the lease token, so a
+  transcription that runs longer than the visibility timeout is neither redelivered nor taken over midway. The
+  heartbeat stops as soon as the attempt ends. A failed attempt therefore still comes back after the normal
+  visibility timeout, and a crashed worker simply stops beating. If an extension finds the lease already lost, the
+  heartbeat stops too.
 - After `maxReceiveCount` (3) deliveries, SQS moves the message to the dead-letter queue. From there it can be
   inspected, and redriven once the cause is fixed.
 - Failures that a retry can't fix, like a file over the size limit or a format the provider rejects, mark the job
@@ -270,10 +276,13 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - the same event delivered three times is transcribed exactly once;
   - a failed attempt is retried and then succeeds;
   - an event that keeps failing lands in the dead-letter queue after 3 attempts;
+  - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat);
   - the Prometheus endpoint reports the pipeline's metrics.
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate, lease held
   elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event. It also checks
-  the metric that each case records.
+  the metric that each case records, and that a lease is kept alive only while the file is being transcribed.
+- `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
+  work ends or the lease is lost.
 - `QueueDepthGaugesTest` checks the queue depth gauges, including that they keep their last value while SQS is
   unreachable.
 - `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server.
@@ -332,7 +341,8 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.upload.url-ttl` | `15m` | Presigned URL lifetime |
 | `pipeline.upload.max-file-size` | `100MB` | Size limit, checked at upload request and again by the worker |
 | `pipeline.worker.concurrency` | `2` | Poller threads |
-| `pipeline.worker.visibility-timeout` | `60s` | Retry delay and job lease; keep it above the longest transcription |
+| `pipeline.worker.visibility-timeout` | `60s` | Retry delay, and how long a crashed worker's job stays claimed |
+| `pipeline.worker.heartbeat-interval` | `20s` | How often running work extends its message and lease; shorter than the visibility timeout |
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |
 | `pipeline.metrics.queue-depth-interval` | `30s` | How often the queue depth gauges are read from SQS |
@@ -359,8 +369,6 @@ monitoring/         Prometheus alert rules and their unit tests
 ## Not covered yet
 
 - **Authentication.** `userId` comes from the request body. A real service would take it from the caller's identity.
-- **Long transcriptions.** The worker should keep extending the message visibility while it works (a heartbeat),
-  instead of relying on one fixed timeout.
 - **Deployment.** Terraform covers the resources the service uses, and there is a container image, but nothing runs
   the image yet: no compute (ECS, App Runner) and no remote Terraform state.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.

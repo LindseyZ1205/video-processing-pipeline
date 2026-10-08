@@ -16,6 +16,12 @@ public interface JobStore {
      */
     Optional<Lease> tryAcquire(String jobId, String bucket, String objectKey);
 
+    /**
+     * Pushes the lease's expiry out by another lease length, while the work on the job is still running. Returns false
+     * if the lease was lost to another worker.
+     */
+    boolean extendLease(Lease lease);
+
     /** Stores the transcript and releases the lease. Returns false if the lease was lost to another worker. */
     boolean complete(Lease lease, String transcript);
 

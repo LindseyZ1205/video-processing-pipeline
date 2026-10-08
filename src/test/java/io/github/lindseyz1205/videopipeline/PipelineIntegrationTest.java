@@ -46,6 +46,7 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
         properties = {
                 "pipeline.aws.bootstrap-resources=true",
                 "pipeline.worker.visibility-timeout=3s",
+                "pipeline.worker.heartbeat-interval=1s",
                 "pipeline.worker.wait-time=1s",
                 "pipeline.queue.max-receive-count=3",
                 "pipeline.metrics.queue-depth-interval=1s"
@@ -121,6 +122,21 @@ class PipelineIntegrationTest {
         UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
         assertThat(done.attempts()).isEqualTo(2);
         assertThat(transcriber.calls(upload.objectKey())).isEqualTo(2);
+    }
+
+    @Test
+    void transcriptionLongerThanTheVisibilityTimeoutIsProcessedOnce() throws Exception {
+        CreateUploadResponse upload = createUpload("all-hands.mp4");
+        // More than two 3 s visibility timeouts. Without the heartbeat the message would reappear meanwhile, and once
+        // the lease ran out the second poller would take the job over and transcribe the file again.
+        transcriber.delay(upload.objectKey(), Duration.ofSeconds(8));
+
+        putFile(upload);
+
+        UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
+        await().atMost(Duration.ofSeconds(30)).until(this::uploadQueueIsEmpty);
+        assertThat(done.attempts()).isEqualTo(1);
+        assertThat(transcriber.calls(upload.objectKey())).isEqualTo(1);
     }
 
     @Test
@@ -247,14 +263,19 @@ class PipelineIntegrationTest {
         }
     }
 
-    /** Stands in for a real provider: counts calls per file and can be told to fail. */
+    /** Stands in for a real provider: counts calls per file, and can be told to fail or to be slow. */
     static class ScriptedTranscriptionService implements TranscriptionService {
 
         private final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
         private final Map<String, Integer> failuresLeft = new ConcurrentHashMap<>();
+        private final Map<String, Duration> delays = new ConcurrentHashMap<>();
 
         void failNextCalls(String objectKey, int times) {
             failuresLeft.put(objectKey, times);
+        }
+
+        void delay(String objectKey, Duration delay) {
+            delays.put(objectKey, delay);
         }
 
         int calls(String objectKey) {
@@ -268,6 +289,15 @@ class PipelineIntegrationTest {
             Integer left = failuresLeft.computeIfPresent(object.key(), (key, remaining) -> remaining - 1);
             if (left != null && left >= 0) {
                 throw new IllegalStateException("simulated transcription failure");
+            }
+            Duration delay = delays.get(object.key());
+            if (delay != null) {
+                try {
+                    Thread.sleep(delay.toMillis());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted while simulating a slow transcription", e);
+                }
             }
             return "transcript of " + object.key();
         }

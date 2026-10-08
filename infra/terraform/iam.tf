@@ -10,8 +10,9 @@ data "aws_iam_policy_document" "service" {
   }
 
   statement {
-    sid       = "ConsumeUploadEvents"
-    actions   = ["sqs:GetQueueUrl", "sqs:ReceiveMessage", "sqs:DeleteMessage"]
+    sid = "ConsumeUploadEvents"
+    # ChangeMessageVisibility: the heartbeat keeps a message hidden while its transcription is still running.
+    actions   = ["sqs:GetQueueUrl", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
     resources = [aws_sqs_queue.events.arn]
   }
 
