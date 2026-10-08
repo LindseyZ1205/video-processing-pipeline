@@ -39,3 +39,17 @@ groups:
           severity: page
         annotations:
           summary: The worker has been failing to poll SQS for 10 minutes
+
+      # A lease lost now and then (a long GC pause, say) costs one extra transcription. Losses that keep coming for
+      # 15 minutes mean something keeps stalling the heartbeat.
+      - alert: JobLeasesKeepGettingLost
+        expr: sum(rate(pipeline_lease_extensions_total{outcome="lost"}[10m])) > 0
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: Workers keep losing job leases while transcribing
+          description: >-
+            Another worker took a job over because its lease ran out before the heartbeat could extend it, so the
+            same file gets transcribed twice. Look for failed lease extensions, workers short of CPU, or a heartbeat
+            interval too close to the visibility timeout.

@@ -127,3 +127,34 @@ tests:
       - eval_time: 25m
         alertname: WorkerCannotReachSqs
         exp_alerts: []
+
+  - name: leases lost minute after minute warn
+    interval: 1m
+    input_series:
+      - series: 'pipeline_lease_extensions_total{outcome="lost"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: JobLeasesKeepGettingLost
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+            exp_annotations:
+              summary: Workers keep losing job leases while transcribing
+              description: Another worker took a job over because its lease ran out before the heartbeat could extend it, so the same file gets transcribed twice. Look for failed lease extensions, workers short of CPU, or a heartbeat interval too close to the visibility timeout.
+
+  - name: a single lost lease among healthy extensions stays quiet
+    interval: 1m
+    input_series:
+      - series: 'pipeline_lease_extensions_total{outcome="extended"}'
+        values: '0+20x30'
+      - series: 'pipeline_lease_extensions_total{outcome="lost"}'
+        values: '0 0 0 1+0x27'
+    alert_rule_test:
+      # Pending while the loss is inside the 10 minute window, which is shorter than the 15 minutes it takes to fire.
+      - eval_time: 10m
+        alertname: JobLeasesKeepGettingLost
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: JobLeasesKeepGettingLost
+        exp_alerts: []

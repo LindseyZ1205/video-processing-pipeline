@@ -137,6 +137,11 @@ class PipelineIntegrationTest {
         await().atMost(Duration.ofSeconds(30)).until(this::uploadQueueIsEmpty);
         assertThat(done.attempts()).isEqualTo(1);
         assertThat(transcriber.calls(upload.objectKey())).isEqualTo(1);
+
+        // An 8 s transcription under a 3 s lease needs at least two extensions. Finishing normally isn't a lost lease.
+        String scrape = api.getForObject("/actuator/prometheus", String.class);
+        assertThat(sum(scrape, "pipeline_lease_extensions_total", "outcome=\"extended\"")).isGreaterThanOrEqualTo(2);
+        assertThat(sum(scrape, "pipeline_lease_extensions_total", "outcome=\"lost\"")).isZero();
     }
 
     @Test

@@ -17,6 +17,9 @@ import java.util.function.Supplier;
  *   <li>{@code pipeline.transcription} (timer, tag {@code outcome}): time spent in the transcription provider</li>
  *   <li>{@code pipeline.events.lag} (timer): from the upload finishing to a worker starting on it, retries included</li>
  *   <li>{@code pipeline.sqs.receive.errors} (counter): failed polls of SQS</li>
+ *   <li>{@code pipeline.lease.extensions} (counter, tag {@code outcome}): heartbeat attempts to extend a job's lease,
+ *   {@code extended}, {@code lost} (another worker had taken the job over) or {@code failed} (the DynamoDB call
+ *   errored)</li>
  * </ul>
  * Queue depths are in {@link QueueDepthGauges}.
  */
@@ -29,6 +32,9 @@ public class PipelineMetrics {
     private final Timer transcriptionFailed;
     private final Timer lag;
     private final Counter receiveErrors;
+    private final Counter leasesExtended;
+    private final Counter leasesLost;
+    private final Counter leaseExtensionsFailed;
 
     public PipelineMetrics(MeterRegistry registry, Clock clock) {
         this.registry = registry;
@@ -48,6 +54,9 @@ public class PipelineMetrics {
         this.receiveErrors = Counter.builder("pipeline.sqs.receive.errors")
                 .description("Failed SQS receive calls")
                 .register(registry);
+        this.leasesExtended = leaseExtensionCounter("extended");
+        this.leasesLost = leaseExtensionCounter("lost");
+        this.leaseExtensionsFailed = leaseExtensionCounter("failed");
     }
 
     void recordOutcome(EventOutcome outcome) {
@@ -79,6 +88,26 @@ public class PipelineMetrics {
 
     void recordReceiveError() {
         receiveErrors.increment();
+    }
+
+    void recordLeaseExtended() {
+        leasesExtended.increment();
+    }
+
+    /** Another worker had taken the job over by the time the heartbeat tried to extend its lease. */
+    void recordLeaseLost() {
+        leasesLost.increment();
+    }
+
+    void recordLeaseExtensionFailed() {
+        leaseExtensionsFailed.increment();
+    }
+
+    private Counter leaseExtensionCounter(String outcome) {
+        return Counter.builder("pipeline.lease.extensions")
+                .description("Heartbeat attempts to extend a running job's lease, by outcome")
+                .tag("outcome", outcome)
+                .register(registry);
     }
 
     private Timer transcriptionTimer(String outcome) {
