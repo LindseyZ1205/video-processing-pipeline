@@ -18,8 +18,8 @@ import java.util.function.Supplier;
  *   <li>{@code pipeline.events.lag} (timer): from the upload finishing to a worker starting on it, retries included</li>
  *   <li>{@code pipeline.sqs.receive.errors} (counter): failed polls of SQS</li>
  *   <li>{@code pipeline.lease.extensions} (counter, tag {@code outcome}): heartbeat attempts to extend a job's lease,
- *   {@code extended}, {@code lost} (another worker had taken the job over) or {@code failed} (the DynamoDB call
- *   errored)</li>
+ *   {@code extended}, {@code lost} (another worker had taken the job over), {@code failed} (the DynamoDB call errored)
+ *   or {@code abandoned} (the work ran past {@code max-processing-time})</li>
  * </ul>
  * Queue depths are in {@link QueueDepthGauges}.
  */
@@ -35,6 +35,7 @@ public class PipelineMetrics {
     private final Counter leasesExtended;
     private final Counter leasesLost;
     private final Counter leaseExtensionsFailed;
+    private final Counter leasesAbandoned;
 
     public PipelineMetrics(MeterRegistry registry, Clock clock) {
         this.registry = registry;
@@ -57,6 +58,7 @@ public class PipelineMetrics {
         this.leasesExtended = leaseExtensionCounter("extended");
         this.leasesLost = leaseExtensionCounter("lost");
         this.leaseExtensionsFailed = leaseExtensionCounter("failed");
+        this.leasesAbandoned = leaseExtensionCounter("abandoned");
     }
 
     void recordOutcome(EventOutcome outcome) {
@@ -101,6 +103,11 @@ public class PipelineMetrics {
 
     void recordLeaseExtensionFailed() {
         leaseExtensionsFailed.increment();
+    }
+
+    /** The work ran past {@code max-processing-time}, so the heartbeat stopped extending its lease. */
+    void recordLeaseAbandoned() {
+        leasesAbandoned.increment();
     }
 
     private Counter leaseExtensionCounter(String outcome) {

@@ -2,6 +2,7 @@ package io.github.lindseyz1205.videopipeline.processing;
 
 import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -25,7 +26,7 @@ import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
  *
  * <p>Each thread finishes the messages it received before it polls again. A slow transcription therefore slows
  * consumption down instead of piling up in-flight work, and a {@link Heartbeat} keeps its message and job lease alive
- * for as long as it runs.
+ * while it runs, up to {@code max-processing-time}.
  */
 public class UploadEventWorker implements SmartLifecycle {
 
@@ -36,6 +37,7 @@ public class UploadEventWorker implements SmartLifecycle {
     private final UploadEventHandler handler;
     private final JobStore jobs;
     private final PipelineMetrics metrics;
+    private final Clock clock;
     private final String queueName;
     private final PipelineProperties.Worker settings;
 
@@ -45,15 +47,20 @@ public class UploadEventWorker implements SmartLifecycle {
     private ScheduledExecutorService heartbeats;
 
     public UploadEventWorker(SqsClient sqs, UploadEventHandler handler, JobStore jobs, PipelineMetrics metrics,
-            String queueName, PipelineProperties.Worker settings) {
+            Clock clock, String queueName, PipelineProperties.Worker settings) {
         if (settings.heartbeatInterval().compareTo(settings.visibilityTimeout()) >= 0) {
             throw new IllegalArgumentException("pipeline.worker.heartbeat-interval (" + settings.heartbeatInterval()
                     + ") must be shorter than pipeline.worker.visibility-timeout (" + settings.visibilityTimeout() + ")");
+        }
+        if (settings.maxProcessingTime().compareTo(settings.visibilityTimeout()) <= 0) {
+            throw new IllegalArgumentException("pipeline.worker.max-processing-time (" + settings.maxProcessingTime()
+                    + ") must be longer than pipeline.worker.visibility-timeout (" + settings.visibilityTimeout() + ")");
         }
         this.sqs = sqs;
         this.handler = handler;
         this.jobs = jobs;
         this.metrics = metrics;
+        this.clock = clock;
         this.queueName = queueName;
         this.settings = settings;
     }
@@ -103,8 +110,8 @@ public class UploadEventWorker implements SmartLifecycle {
     }
 
     private void handle(Message message) {
-        Heartbeat heartbeat = new Heartbeat(sqs, jobs, metrics, heartbeats, queueUrl, message.receiptHandle(),
-                settings.visibilityTimeout(), settings.heartbeatInterval());
+        Heartbeat heartbeat = new Heartbeat(sqs, jobs, metrics, heartbeats, clock, settings, queueUrl,
+                message.receiptHandle());
         try (MDC.MDCCloseable ignored = MDC.putCloseable("messageId", message.messageId())) {
             boolean handled = handler.handle(message.body(), heartbeat);
             heartbeat.close(); // the message's fate is decided; it must not be extended after this
