@@ -14,6 +14,8 @@ import static org.mockito.Mockito.when;
 
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -35,8 +37,9 @@ class HeartbeatTest {
     private final JobStore jobs = mock(JobStore.class);
     private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     private final ScheduledFuture<?> beats = mock(ScheduledFuture.class);
-    private final Heartbeat heartbeat = new Heartbeat(sqs, jobs, scheduler,
-            "https://sqs.us-east-1.amazonaws.com/000000000000/video-upload-events", "receipt-1",
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final Heartbeat heartbeat = new Heartbeat(sqs, jobs, new PipelineMetrics(metrics, Clock.systemUTC()),
+            scheduler, "https://sqs.us-east-1.amazonaws.com/000000000000/video-upload-events", "receipt-1",
             Duration.ofSeconds(60), Duration.ofSeconds(20));
 
     @BeforeEach
@@ -72,6 +75,7 @@ class HeartbeatTest {
         assertThat(request.getValue().receiptHandle()).isEqualTo("receipt-1");
         assertThat(request.getValue().visibilityTimeout()).isEqualTo(60);
         verify(jobs, times(2)).extendLease(LEASE);
+        assertThat(leaseExtensions("extended")).isEqualTo(2);
     }
 
     @Test
@@ -98,6 +102,20 @@ class HeartbeatTest {
         verify(beats).cancel(false);
         verify(sqs, times(1)).changeMessageVisibility(any(ChangeMessageVisibilityRequest.class));
         verify(jobs, times(1)).extendLease(LEASE);
+        assertThat(leaseExtensions("lost")).isEqualTo(1);
+        assertThat(leaseExtensions("extended")).isZero();
+    }
+
+    @Test
+    void countsAnUnreachableJobStoreAndKeepsBeating() {
+        when(jobs.extendLease(LEASE)).thenThrow(new IllegalStateException("DynamoDB unavailable"));
+        heartbeat.keepAlive(LEASE);
+
+        heartbeat.beat();
+        heartbeat.beat();
+
+        assertThat(leaseExtensions("failed")).isEqualTo(2);
+        verify(beats, never()).cancel(false);
     }
 
     @Test
@@ -108,5 +126,9 @@ class HeartbeatTest {
         heartbeat.beat();
 
         verifyNoInteractions(scheduler, sqs, jobs);
+    }
+
+    private double leaseExtensions(String outcome) {
+        return metrics.get("pipeline.lease.extensions").tag("outcome", outcome).counter().count();
     }
 }

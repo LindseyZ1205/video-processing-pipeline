@@ -103,7 +103,7 @@ public class UploadEventWorker implements SmartLifecycle {
     }
 
     private void handle(Message message) {
-        Heartbeat heartbeat = new Heartbeat(sqs, jobs, heartbeats, queueUrl, message.receiptHandle(),
+        Heartbeat heartbeat = new Heartbeat(sqs, jobs, metrics, heartbeats, queueUrl, message.receiptHandle(),
                 settings.visibilityTimeout(), settings.heartbeatInterval());
         try (MDC.MDCCloseable ignored = MDC.putCloseable("messageId", message.messageId())) {
             boolean handled = handler.handle(message.body(), heartbeat);

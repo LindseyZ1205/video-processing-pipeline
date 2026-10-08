@@ -243,6 +243,7 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 | `pipeline_events_lag_seconds` | histogram | From the upload finishing to a worker starting on it: queueing plus retry delays |
 | `pipeline_queue_messages{queue,state}` | gauge | Visible and in-flight messages on the event queue and the dead-letter queue, refreshed every 30 s |
 | `pipeline_sqs_receive_errors_total` | counter | Failed polls of SQS |
+| `pipeline_lease_extensions_total{outcome}` | counter | Heartbeat attempts to extend a job's lease: `extended`, `lost` (another worker had taken the job over) or `failed` (the DynamoDB call errored) |
 
 [`monitoring/alerts.yml`](monitoring/alerts.yml) turns these metrics into Prometheus alert rules:
 
@@ -252,6 +253,7 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 | `UploadEventsFailing` | more than 10% of attempts failed, for 10 minutes | warn |
 | `SlowUploadPickup` | the p95 time from upload to pickup stays above 2 minutes, for 10 minutes | warn |
 | `WorkerCannotReachSqs` | polling SQS keeps failing, for 10 minutes | page |
+| `JobLeasesKeepGettingLost` | running jobs keep losing their lease to another worker, for 15 minutes | warn |
 
 Each rule has unit tests in [`monitoring/alerts.test.yml`](monitoring/alerts.test.yml): synthetic series where it
 must fire, and where it must stay quiet. CI runs `promtool check rules` and `promtool test rules` in the `build` job.
@@ -276,13 +278,15 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - the same event delivered three times is transcribed exactly once;
   - a failed attempt is retried and then succeeds;
   - an event that keeps failing lands in the dead-letter queue after 3 attempts;
-  - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat);
+  - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
+    and the lease extensions show up in the metrics with none lost;
   - the Prometheus endpoint reports the pipeline's metrics.
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate, lease held
   elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event. It also checks
   the metric that each case records, and that a lease is kept alive only while the file is being transcribed.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
-  work ends or the lease is lost.
+  work ends or the lease is lost. It also checks the outcome each extension records, including when DynamoDB can't
+  be reached.
 - `QueueDepthGaugesTest` checks the queue depth gauges, including that they keep their last value while SQS is
   unreachable.
 - `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server.

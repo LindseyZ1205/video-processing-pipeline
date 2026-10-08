@@ -28,6 +28,7 @@ class Heartbeat implements LeaseKeeper, AutoCloseable {
 
     private final SqsClient sqs;
     private final JobStore jobs;
+    private final PipelineMetrics metrics;
     private final ScheduledExecutorService scheduler;
     private final String queueUrl;
     private final String receiptHandle;
@@ -38,10 +39,11 @@ class Heartbeat implements LeaseKeeper, AutoCloseable {
     private ScheduledFuture<?> beats;
     private volatile boolean stopped;
 
-    Heartbeat(SqsClient sqs, JobStore jobs, ScheduledExecutorService scheduler, String queueUrl, String receiptHandle,
-            Duration visibilityTimeout, Duration interval) {
+    Heartbeat(SqsClient sqs, JobStore jobs, PipelineMetrics metrics, ScheduledExecutorService scheduler,
+            String queueUrl, String receiptHandle, Duration visibilityTimeout, Duration interval) {
         this.sqs = sqs;
         this.jobs = jobs;
+        this.metrics = metrics;
         this.scheduler = scheduler;
         this.queueUrl = queueUrl;
         this.receiptHandle = receiptHandle;
@@ -82,14 +84,18 @@ class Heartbeat implements LeaseKeeper, AutoCloseable {
         }
         for (Lease lease : leases) {
             try {
-                // A lease released meanwhile is finishing normally; only a lease still held can have been lost.
-                if (!jobs.extendLease(lease) && leases.contains(lease)) {
+                if (jobs.extendLease(lease)) {
+                    metrics.recordLeaseExtended();
+                } else if (leases.contains(lease)) {
+                    // A lease released meanwhile is finishing normally; only a lease still held can have been lost.
+                    metrics.recordLeaseLost();
                     log.warn("Lost the lease on job {} (attempt {}); another worker has taken it over, so the "
                             + "heartbeat stops", lease.jobId(), lease.attempt());
                     close();
                     return;
                 }
             } catch (RuntimeException e) {
+                metrics.recordLeaseExtensionFailed();
                 log.warn("Could not extend the lease on job {}", lease.jobId(), e);
             }
         }
