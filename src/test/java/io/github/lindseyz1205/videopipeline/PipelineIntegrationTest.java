@@ -116,6 +116,26 @@ class PipelineIntegrationTest {
     }
 
     @Test
+    void duplicateOfAnEventStillBeingProcessedIsDroppedRightAway() throws Exception {
+        CreateUploadResponse upload = createUpload("weekly-review.mp4");
+        transcriber.delay(upload.objectKey(), Duration.ofSeconds(8));
+        putFile(upload);
+        awaitStatus(upload.uploadId(), JobStatus.PROCESSING);
+        double duplicatesBefore = duplicateEvents();
+
+        sendUploadEvent(upload.objectKey());
+
+        // Dropped while the job is still running. It used to come back busy every visibility timeout, and during a
+        // long enough transcription it ended up in the dead-letter queue.
+        await().atMost(Duration.ofSeconds(5)).until(() -> duplicateEvents() > duplicatesBefore);
+        assertThat(status(upload.uploadId()).status()).isEqualTo(JobStatus.PROCESSING);
+
+        UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
+        assertThat(done.attempts()).isEqualTo(1);
+        assertThat(transcriber.calls(upload.objectKey())).isEqualTo(1);
+    }
+
+    @Test
     void failedAttemptIsRetried() throws Exception {
         CreateUploadResponse upload = createUpload("flaky.mp4");
         transcriber.failNextCalls(upload.objectKey(), 1);
@@ -271,6 +291,11 @@ class PipelineIntegrationTest {
 
     private String queueUrl(String queueName) {
         return sqs.getQueueUrl(r -> r.queueName(queueName)).queueUrl();
+    }
+
+    private double duplicateEvents() {
+        String scrape = api.getForObject("/actuator/prometheus", String.class);
+        return sum(scrape, "pipeline_events_total", "outcome=\"duplicate\"");
     }
 
     /** Adds up the samples of {@code metric} whose labels contain {@code label}, from Prometheus text format. */

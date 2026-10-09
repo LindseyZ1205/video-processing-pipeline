@@ -41,6 +41,7 @@ public class DynamoDbJobStore implements JobStore {
     private static final String OBJECT_KEY = "objectKey";
     private static final String LEASE_TOKEN = "leaseToken";
     private static final String LEASE_EXPIRES_AT = "leaseExpiresAt";
+    private static final String LEASE_MESSAGE_ID = "leaseMessageId";
     private static final String TRANSCRIPT = "transcript";
     private static final String LAST_ERROR = "lastError";
     private static final String CREATED_AT = "createdAt";
@@ -86,7 +87,7 @@ public class DynamoDbJobStore implements JobStore {
     }
 
     @Override
-    public Optional<Lease> tryAcquire(String jobId, String bucket, String objectKey) {
+    public Optional<Lease> tryAcquire(String jobId, String bucket, String objectKey, String messageId) {
         Instant now = clock.instant();
         String token = UUID.randomUUID().toString();
 
@@ -97,6 +98,7 @@ public class DynamoDbJobStore implements JobStore {
         values.put(":nowMillis", n(now.toEpochMilli()));
         values.put(":token", s(token));
         values.put(":leaseExpiresAt", n(now.plus(leaseDuration).toEpochMilli()));
+        values.put(":messageId", s(messageId));
         values.put(":zero", n(0));
         values.put(":one", n(1));
         values.put(":now", s(now.toString()));
@@ -114,13 +116,14 @@ public class DynamoDbJobStore implements JobStore {
                             + " OR #status IN (:pending, :failed)"
                             + " OR (#status = :processing AND #leaseExpiresAt < :nowMillis)")
                     .updateExpression("SET #status = :processing, #leaseToken = :token, #leaseExpiresAt = :leaseExpiresAt,"
+                            + " #leaseMessageId = :messageId,"
                             + " #attempts = if_not_exists(#attempts, :zero) + :one, #updatedAt = :now,"
                             + " #bucket = if_not_exists(#bucket, :bucket),"
                             + " #objectKey = if_not_exists(#objectKey, :objectKey),"
                             + " #createdAt = if_not_exists(#createdAt, :now),"
                             + " #expiresAt = if_not_exists(#expiresAt, :expiresAt)")
-                    .expressionAttributeNames(names(JOB_ID, STATUS, LEASE_TOKEN, LEASE_EXPIRES_AT, ATTEMPTS, UPDATED_AT,
-                            BUCKET, OBJECT_KEY, CREATED_AT, EXPIRES_AT))
+                    .expressionAttributeNames(names(JOB_ID, STATUS, LEASE_TOKEN, LEASE_EXPIRES_AT, LEASE_MESSAGE_ID,
+                            ATTEMPTS, UPDATED_AT, BUCKET, OBJECT_KEY, CREATED_AT, EXPIRES_AT))
                     .expressionAttributeValues(values)
                     .returnValues(ReturnValue.UPDATED_NEW)
                     .build());
@@ -161,8 +164,8 @@ public class DynamoDbJobStore implements JobStore {
 
         return updateUnderLease(lease,
                 "SET #status = :completed, #transcript = :transcript, #updatedAt = :now"
-                        + " REMOVE #leaseToken, #leaseExpiresAt, #lastError",
-                names(LEASE_TOKEN, STATUS, TRANSCRIPT, UPDATED_AT, LEASE_EXPIRES_AT, LAST_ERROR),
+                        + " REMOVE #leaseToken, #leaseExpiresAt, #leaseMessageId, #lastError",
+                names(LEASE_TOKEN, STATUS, TRANSCRIPT, UPDATED_AT, LEASE_EXPIRES_AT, LEASE_MESSAGE_ID, LAST_ERROR),
                 values);
     }
 
@@ -175,8 +178,9 @@ public class DynamoDbJobStore implements JobStore {
         values.put(":now", s(clock.instant().toString()));
 
         return updateUnderLease(lease,
-                "SET #status = :failed, #lastError = :error, #updatedAt = :now REMOVE #leaseToken, #leaseExpiresAt",
-                names(LEASE_TOKEN, STATUS, LAST_ERROR, UPDATED_AT, LEASE_EXPIRES_AT),
+                "SET #status = :failed, #lastError = :error, #updatedAt = :now"
+                        + " REMOVE #leaseToken, #leaseExpiresAt, #leaseMessageId",
+                names(LEASE_TOKEN, STATUS, LAST_ERROR, UPDATED_AT, LEASE_EXPIRES_AT, LEASE_MESSAGE_ID),
                 values);
     }
 
@@ -201,18 +205,6 @@ public class DynamoDbJobStore implements JobStore {
     }
 
     @Override
-    public boolean isCompleted(String jobId) {
-        GetItemResponse response = dynamo.getItem(GetItemRequest.builder()
-                .tableName(table)
-                .key(key(jobId))
-                .consistentRead(true)
-                .projectionExpression("#status")
-                .expressionAttributeNames(names(STATUS))
-                .build());
-        return response.hasItem() && JobStatus.COMPLETED.name().equals(string(response.item(), STATUS));
-    }
-
-    @Override
     public Optional<Job> find(String jobId) {
         GetItemResponse response = dynamo.getItem(GetItemRequest.builder()
                 .tableName(table)
@@ -230,7 +222,8 @@ public class DynamoDbJobStore implements JobStore {
                 string(item, OBJECT_KEY),
                 string(item, TRANSCRIPT),
                 string(item, LAST_ERROR),
-                Instant.parse(string(item, UPDATED_AT))));
+                Instant.parse(string(item, UPDATED_AT)),
+                string(item, LEASE_MESSAGE_ID)));
     }
 
     private static Map<String, AttributeValue> key(String jobId) {

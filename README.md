@@ -95,7 +95,11 @@ harmless:
   conditioned on that token. A worker that stalls past its lease can't overwrite the result of the worker that took
   over.
 - **Losers check why they lost.** If the job is already `COMPLETED`, the message is a duplicate and is deleted. If
-  another worker holds a live lease, the message is left on the queue and comes back after the visibility timeout.
+  another worker holds a live lease, the job also records which SQS message that worker claimed it through. A
+  different message is a duplicate of work in progress and is deleted too: the claiming message stays on the queue
+  until the job is done, and comes back if its worker dies. Only a redelivery of the claiming message itself stays on
+  the queue, to come back after the visibility timeout. Otherwise a duplicate of a long transcription would keep
+  coming back busy until it landed in the dead-letter queue.
 
 The transcription call itself can still run twice in rare cases: for example, a worker dies after transcribing but
 before recording the result. That is the at-least-once contract, and `TranscriptionService` implementations must
@@ -323,16 +327,17 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   checks that:
   - an uploaded file ends up `COMPLETED` with its transcript;
   - the same event delivered three times is transcribed exactly once;
+  - a duplicate that arrives while the job is still running is dropped right away;
   - a failed attempt is retried and then succeeds;
   - an event that keeps failing lands in the dead-letter queue after 3 attempts;
   - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
     and the lease extensions show up in the metrics with none lost;
   - a transcription that hangs is given up on after `max-processing-time`, and the next delivery completes the job;
   - the Prometheus endpoint reports the pipeline's metrics.
-- `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate, lease held
-  elsewhere, lease lost, transient failure, permanent failure, unreachable job store, unreadable message, S3 test
-  event. It also checks the metric that each case records, and that a lease is kept alive only while the file is
-  being transcribed.
+- `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate of a completed
+  job, duplicate of a job still running, redelivery of the message that holds the lease, lease lost, transient
+  failure, permanent failure, unreachable job store, unreadable message, S3 test event. It also checks the metric
+  that each case records, and that a lease is kept alive only while the file is being transcribed.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
   work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
   each extension records, including when DynamoDB can't be reached.

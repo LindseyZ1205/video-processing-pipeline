@@ -1,5 +1,7 @@
 package io.github.lindseyz1205.videopipeline.processing;
 
+import io.github.lindseyz1205.videopipeline.job.Job;
+import io.github.lindseyz1205.videopipeline.job.JobStatus;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
 import io.github.lindseyz1205.videopipeline.transcription.StoredObject;
@@ -22,7 +24,8 @@ import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
  * <p>S3 notifications and SQS both deliver at least once, so the same upload can arrive several times, even on two
  * workers at once. The job record is the idempotency guard: only the worker that wins the conditional update in
  * {@link JobStore#tryAcquire} processes the file. Once the job is completed, later duplicates are deleted without
- * doing the work again.
+ * doing the work again. So are duplicates that arrive while it is still being processed, because the message that
+ * claimed the job stays on the queue until the job is done.
  */
 public class UploadEventHandler {
 
@@ -43,42 +46,43 @@ public class UploadEventHandler {
         this.maxFileSizeBytes = maxFileSize.toBytes();
     }
 
-    /** {@link #handle(String, LeaseKeeper)} without keeping leases alive: each lease runs for its initial length. */
-    public boolean handle(String messageBody) {
-        return handle(messageBody, LeaseKeeper.NONE);
+    /** {@link #handle(String, String, LeaseKeeper)} without keeping leases alive: each lease keeps its first length. */
+    public boolean handle(String messageId, String messageBody) {
+        return handle(messageId, messageBody, LeaseKeeper.NONE);
     }
 
     /**
-     * @param leases told when work on a job starts and ends, so the caller can keep the job's lease alive meanwhile
+     * @param messageId the SQS message's ID, the same on every delivery of that message
+     * @param leases    told when work on a job starts and ends, so the caller can keep the job's lease alive meanwhile
      * @return true when the message is fully handled and can be deleted; false to leave it on the queue so SQS
      *         delivers it again after the visibility timeout (and eventually moves it to the dead-letter queue)
      * @throws RuntimeException if the job store is unreachable or the message isn't a readable S3 event. The message
      *         stays on the queue in that case too, and the event counts as {@code error}, so the failure rate shows it.
      */
-    public boolean handle(String messageBody, LeaseKeeper leases) {
+    public boolean handle(String messageId, String messageBody, LeaseKeeper leases) {
         try {
-            return handle(S3EventNotification.parse(messageBody), leases);
+            return handle(messageId, S3EventNotification.parse(messageBody), leases);
         } catch (RuntimeException e) {
             metrics.recordOutcome(EventOutcome.ERROR);
             throw e;
         }
     }
 
-    private boolean handle(S3EventNotification notification, LeaseKeeper leases) {
+    private boolean handle(String messageId, S3EventNotification notification, LeaseKeeper leases) {
         if (notification.isTestEvent()) {
             log.info("Ignoring the s3:TestEvent sent when the bucket notification was configured");
             return true;
         }
         boolean deleteMessage = true;
         for (S3EventNotification.EventRecord record : notification.records()) {
-            EventOutcome outcome = process(record, leases);
+            EventOutcome outcome = process(record, messageId, leases);
             metrics.recordOutcome(outcome);
             deleteMessage &= outcome.deletesMessage();
         }
         return deleteMessage;
     }
 
-    private EventOutcome process(S3EventNotification.EventRecord record, LeaseKeeper leases) {
+    private EventOutcome process(S3EventNotification.EventRecord record, String messageId, LeaseKeeper leases) {
         if (!record.isObjectCreated()) {
             log.warn("Ignoring unexpected event {}", record.eventName());
             return EventOutcome.IGNORED;
@@ -92,20 +96,15 @@ public class UploadEventHandler {
         String jobId = upload.get().uploadId();
         // Every log line about this job carries its ID (a field of its own in structured logs).
         try (MDC.MDCCloseable ignored = MDC.putCloseable("jobId", jobId)) {
-            return process(jobId, record, objectKey, leases);
+            return process(jobId, record, objectKey, messageId, leases);
         }
     }
 
     private EventOutcome process(String jobId, S3EventNotification.EventRecord record, String objectKey,
-            LeaseKeeper leases) {
-        Optional<Lease> acquired = jobs.tryAcquire(jobId, record.bucketName(), objectKey);
+            String messageId, LeaseKeeper leases) {
+        Optional<Lease> acquired = jobs.tryAcquire(jobId, record.bucketName(), objectKey, messageId);
         if (acquired.isEmpty()) {
-            if (jobs.isCompleted(jobId)) {
-                log.info("Job {} is already completed; dropping the duplicate event", jobId);
-                return EventOutcome.DUPLICATE;
-            }
-            log.info("Job {} is held by another worker; checking again after the visibility timeout", jobId);
-            return EventOutcome.BUSY;
+            return lostClaim(jobId, messageId);
         }
 
         Lease lease = acquired.get();
@@ -126,6 +125,28 @@ public class UploadEventHandler {
             jobs.fail(lease, e.toString());
             return EventOutcome.FAILED;
         }
+    }
+
+    /**
+     * The claim failed, so the job is completed or another delivery holds a live lease on it. Only a redelivery of the
+     * message that holds the lease must stay on the queue. Any other message is a duplicate: the holding message stays
+     * until the job is done, and comes back if its worker dies, so dropping the copy loses nothing. Kept, the copy
+     * would come back busy every visibility timeout, and during a long transcription it would reach the dead-letter
+     * queue.
+     */
+    private EventOutcome lostClaim(String jobId, String messageId) {
+        Optional<Job> job = jobs.find(jobId);
+        if (job.isPresent() && job.get().status() == JobStatus.COMPLETED) {
+            log.info("Job {} is already completed; dropping the duplicate event", jobId);
+            return EventOutcome.DUPLICATE;
+        }
+        String holder = job.map(Job::leaseMessageId).orElse(null);
+        if (holder != null && !holder.equals(messageId)) {
+            log.info("Job {} is being processed through message {}; dropping this duplicate", jobId, holder);
+            return EventOutcome.DUPLICATE;
+        }
+        log.info("Job {} is held by another worker; checking again after the visibility timeout", jobId);
+        return EventOutcome.BUSY;
     }
 
     /**

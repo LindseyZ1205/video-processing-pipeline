@@ -8,11 +8,15 @@ import java.util.Locale;
 enum EventOutcome {
 
     PROCESSED(true),
+    /** The job is completed, or a delivery of another message is processing it. This copy has nothing left to do. */
     DUPLICATE(true),
     IGNORED(true),
     /** Permanent failure. Retrying cannot help, so the message does not use up SQS retries. */
     REJECTED(true),
-    /** Another worker owns the job right now. */
+    /**
+     * An earlier delivery of this same message holds the job's lease, or this delivery lost its lease before storing
+     * the result. The message stays, so SQS delivers it again.
+     */
     BUSY(false),
     /** Transient failure. The message stays so SQS retries it. */
     FAILED(false),
