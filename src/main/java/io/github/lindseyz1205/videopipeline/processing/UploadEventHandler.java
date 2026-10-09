@@ -52,10 +52,19 @@ public class UploadEventHandler {
      * @param leases told when work on a job starts and ends, so the caller can keep the job's lease alive meanwhile
      * @return true when the message is fully handled and can be deleted; false to leave it on the queue so SQS
      *         delivers it again after the visibility timeout (and eventually moves it to the dead-letter queue)
-     * @throws RuntimeException if the job store or S3 is unreachable. The message stays on the queue in that case too.
+     * @throws RuntimeException if the job store is unreachable or the message isn't a readable S3 event. The message
+     *         stays on the queue in that case too, and the event counts as {@code error}, so the failure rate shows it.
      */
     public boolean handle(String messageBody, LeaseKeeper leases) {
-        S3EventNotification notification = S3EventNotification.parse(messageBody);
+        try {
+            return handle(S3EventNotification.parse(messageBody), leases);
+        } catch (RuntimeException e) {
+            metrics.recordOutcome(EventOutcome.ERROR);
+            throw e;
+        }
+    }
+
+    private boolean handle(S3EventNotification notification, LeaseKeeper leases) {
         if (notification.isTestEvent()) {
             log.info("Ignoring the s3:TestEvent sent when the bucket notification was configured");
             return true;

@@ -55,6 +55,22 @@ tests:
             exp_annotations:
               summary: More than 10% of upload event attempts are failing
 
+  - name: events that error out count as failures
+    interval: 1m
+    input_series:
+      - series: 'pipeline_events_total{outcome="processed"}'
+        values: '0+10x30'
+      - series: 'pipeline_events_total{outcome="error"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: UploadEventsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+            exp_annotations:
+              summary: More than 10% of upload event attempts are failing
+
   - name: an occasional failure stays quiet
     interval: 1m
     input_series:

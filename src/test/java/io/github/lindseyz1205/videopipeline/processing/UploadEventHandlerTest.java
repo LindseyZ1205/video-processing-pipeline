@@ -129,6 +129,16 @@ class UploadEventHandlerTest {
 
         assertThatThrownBy(() -> handler.handle(EVENT)).hasMessageContaining("DynamoDB unavailable");
         verifyNoInteractions(transcription);
+        assertThat(events("error")).isEqualTo(1);
+        assertThat(events("duplicate")).isZero();
+        assertThat(events("busy")).isZero();
+    }
+
+    @Test
+    void countsAMessageItCannotRead() {
+        assertThatThrownBy(() -> handler.handle("not an S3 event")).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(jobs);
+        assertThat(events("error")).isEqualTo(1);
     }
 
     @Test
