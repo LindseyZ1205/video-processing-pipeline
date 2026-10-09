@@ -15,7 +15,12 @@ enum EventOutcome {
     /** Another worker owns the job right now. */
     BUSY(false),
     /** Transient failure. The message stays so SQS retries it. */
-    FAILED(false);
+    FAILED(false),
+    /**
+     * Handling stopped on an exception before an outcome was decided: the job store couldn't be reached, or the message
+     * isn't a readable S3 event. The message stays, so SQS retries it.
+     */
+    ERROR(false);
 
     private final boolean deletesMessage;
 

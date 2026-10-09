@@ -14,9 +14,10 @@ groups:
             {{ $value }} upload event(s) failed processing too many times. Check the job's lastError, fix the cause,
             then redrive the dead-letter queue.
 
+      # Errors are events whose handling threw, for example while DynamoDB was unreachable.
       - alert: UploadEventsFailing
         expr: |
-          sum(rate(pipeline_events_total{outcome="failed"}[10m]))
+          sum(rate(pipeline_events_total{outcome=~"failed|error"}[10m]))
             / sum(rate(pipeline_events_total[10m])) > 0.1
         for: 10m
         labels:

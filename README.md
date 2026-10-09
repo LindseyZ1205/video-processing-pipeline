@@ -113,7 +113,9 @@ tolerate it.
   inspected, and redriven once the cause is fixed.
 - Failures that a retry can't fix, like a file over the size limit or a format the provider rejects, mark the job
   `FAILED` and delete the message right away, so they don't use up retries.
-- If DynamoDB or S3 is unreachable, the worker doesn't guess. The message stays on the queue.
+- If DynamoDB or S3 is unreachable, the worker doesn't guess. The message stays on the queue, and the failure-rate
+  alert sees the outage either way: an S3 error fails the attempt, and a DynamoDB error escapes the handler and counts
+  as an `error`.
 - S3 also sends an `s3:TestEvent` when a notification is first configured. The worker recognizes it and drops it.
 
 ### Heartbeats for long transcriptions
@@ -283,7 +285,7 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 
 | Metric | Type | What it shows |
 |---|---|---|
-| `pipeline_events_total{outcome}` | counter | Every S3 event record the worker handled: `processed`, `duplicate`, `busy`, `failed`, `rejected` or `ignored` |
+| `pipeline_events_total{outcome}` | counter | Every S3 event record the worker handled: `processed`, `duplicate`, `busy`, `failed`, `rejected`, `ignored`, or `error` when handling threw (DynamoDB unreachable, unreadable message) |
 | `pipeline_transcription_seconds{outcome}` | histogram | Time spent in the transcription provider, by `success` or `failure` |
 | `pipeline_events_lag_seconds` | histogram | From the upload finishing to a worker starting on it: queueing plus retry delays |
 | `pipeline_queue_messages{queue,state}` | gauge | Visible and in-flight messages on the event queue and the dead-letter queue, refreshed every 30 s |
@@ -295,7 +297,7 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 | Alert | Fires when | Severity |
 |---|---|---|
 | `UploadEventsInDeadLetterQueue` | a message has sat in the dead-letter queue for 5 minutes | page |
-| `UploadEventsFailing` | more than 10% of attempts failed, for 10 minutes | warn |
+| `UploadEventsFailing` | more than 10% of attempts failed or errored, for 10 minutes | warn |
 | `SlowUploadPickup` | the p95 time from upload to pickup stays above 2 minutes, for 10 minutes | warn |
 | `WorkerCannotReachSqs` | polling SQS keeps failing, for 10 minutes | page |
 | `JobLeasesKeepGettingLost` | running jobs keep losing their lease to another worker, for 15 minutes | warn |
@@ -328,8 +330,9 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - a transcription that hangs is given up on after `max-processing-time`, and the next delivery completes the job;
   - the Prometheus endpoint reports the pipeline's metrics.
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate, lease held
-  elsewhere, lease lost, transient failure, permanent failure, unreachable job store, S3 test event. It also checks
-  the metric that each case records, and that a lease is kept alive only while the file is being transcribed.
+  elsewhere, lease lost, transient failure, permanent failure, unreachable job store, unreadable message, S3 test
+  event. It also checks the metric that each case records, and that a lease is kept alive only while the file is
+  being transcribed.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
   work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
   each extension records, including when DynamoDB can't be reached.
