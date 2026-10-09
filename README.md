@@ -107,21 +107,63 @@ tolerate it.
   and SQS redelivers it once the visibility timeout expires, so the visibility timeout doubles as the retry delay.
 - The worker sets the visibility timeout on every `ReceiveMessage` and uses the same value as the job lease. When a
   crashed worker's message reappears, its lease has already expired, so the next delivery can take over.
-- Long work keeps its claim. While a file is being transcribed, a heartbeat runs every `heartbeat-interval` (20 s).
-  Each beat resets the message's visibility timeout and extends the job lease, conditioned on the lease token, so a
-  transcription that runs longer than the visibility timeout is neither redelivered nor taken over midway. The
-  heartbeat stops as soon as the attempt ends. A failed attempt therefore still comes back after the normal
-  visibility timeout, and a crashed worker simply stops beating. If an extension finds the lease already lost, the
-  heartbeat stops too.
-- But not forever. After `max-processing-time` (15 min) the heartbeat gives up, because a transcription that hangs
-  would otherwise hold its job indefinitely. Its lease then runs out, and the next delivery takes the job over.
-  Requests to OpenAI time out after 5 minutes, so a stalled request normally fails well before that.
+- Long work keeps its claim with a heartbeat, up to a limit. See
+  [Heartbeats for long transcriptions](#heartbeats-for-long-transcriptions).
 - After `maxReceiveCount` (3) deliveries, SQS moves the message to the dead-letter queue. From there it can be
   inspected, and redriven once the cause is fixed.
 - Failures that a retry can't fix, like a file over the size limit or a format the provider rejects, mark the job
   `FAILED` and delete the message right away, so they don't use up retries.
 - If DynamoDB or S3 is unreachable, the worker doesn't guess. The message stays on the queue.
 - S3 also sends an `s3:TestEvent` when a notification is first configured. The worker recognizes it and drops it.
+
+### Heartbeats for long transcriptions
+
+A transcription can run longer than the visibility timeout. Left alone, SQS would redeliver the message midway, and
+once the lease ran out another worker would take the job over and transcribe the file a second time. So while a file
+is being transcribed, a heartbeat runs every `heartbeat-interval` (20 s). Each beat resets the message's visibility
+timeout and extends the job lease, conditioned on the lease token:
+
+```mermaid
+sequenceDiagram
+    participant Q as SQS
+    participant A as Worker A
+    participant D as DynamoDB
+    participant B as Worker B
+
+    Q->>A: receive message (hidden for 60 s)
+    A->>D: claim job: lease token T1, valid for 60 s
+    loop every 20 s while transcribing
+        A->>Q: ChangeMessageVisibility: hidden for 60 s more
+        A->>D: extend lease if token = T1
+    end
+    alt transcription finishes
+        Note over A: heartbeat stops first
+        A->>D: COMPLETED if token = T1
+        A->>Q: delete message
+    else A stalls for over 60 s, and B takes the job
+        Q->>B: message reappears
+        B->>D: claim job: token T2, attempt 2
+        A->>D: late beat: extend lease if token = T1
+        D-->>A: condition failed
+        Note over A: heartbeat stops (lost)<br/>A's result is rejected later: storing it needs T1
+    else still transcribing after max-processing-time (15 min)
+        Note over A: heartbeat gives up (abandoned)
+        Note over Q,D: 60 s after the last beat, the message<br/>reappears and the lease expires
+        Q->>B: message reappears
+        B->>D: claim job: token T2, attempt 2
+    end
+```
+
+- The heartbeat runs only while the file is being transcribed. It lets go of the lease before the result is
+  written, so a late beat can't race with that write, and a failed attempt still comes back after the normal
+  visibility timeout. A crashed worker simply stops beating.
+- If an extension finds the lease already lost, the heartbeat stops. Because the lease is fenced, the stalled
+  worker's result is rejected when it tries to store it.
+- After `max-processing-time` (15 min) the heartbeat gives up, because a transcription that hangs would otherwise
+  hold its job indefinitely. Its lease then runs out, and the next delivery takes the job over. Requests to OpenAI
+  time out after 5 minutes, so a stalled request normally fails well before that.
+- Each extension's outcome is counted in `pipeline_lease_extensions_total` (`extended`, `lost`, `failed`,
+  `abandoned`), and the `JobLeasesKeepGettingLost` alert warns when leases keep getting lost.
 
 ### Pluggable transcription
 
