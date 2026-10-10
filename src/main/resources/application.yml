@@ -38,6 +38,8 @@ pipeline:
     heartbeat-interval: 20s
     # The heartbeat gives up on work that runs longer, so a hung attempt's lease runs out and SQS retries the job.
     max-processing-time: 15m
+    # After a failed attempt the message waits one visibility timeout, then twice that, and so on, up to this.
+    max-retry-delay: 15m
   transcription:
     provider: fake # fake | openai
     openai:
