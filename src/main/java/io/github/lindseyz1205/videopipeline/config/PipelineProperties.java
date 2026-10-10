@@ -52,9 +52,11 @@ public record PipelineProperties(
      * @param maxProcessingTime how long the heartbeat keeps extending the work on one message. Past that it gives up,
      *                          so a hung attempt's lease runs out and the next delivery takes the job over. Must be
      *                          longer than the visibility timeout.
+     * @param maxRetryDelay     the longest a message waits after a failed attempt. The wait starts at one visibility
+     *                          timeout and doubles with each delivery. Between the visibility timeout and 12 hours.
      */
     public record Worker(boolean enabled, int concurrency, int maxMessages, Duration waitTime, Duration visibilityTimeout,
-            Duration heartbeatInterval, Duration maxProcessingTime) {
+            Duration heartbeatInterval, Duration maxProcessingTime, Duration maxRetryDelay) {
     }
 
     public record Transcription(String provider, OpenAi openai) {

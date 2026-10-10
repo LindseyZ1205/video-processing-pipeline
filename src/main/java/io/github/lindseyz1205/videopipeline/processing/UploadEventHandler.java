@@ -47,19 +47,21 @@ public class UploadEventHandler {
     }
 
     /** {@link #handle(String, String, LeaseKeeper)} without keeping leases alive: each lease keeps its first length. */
-    public boolean handle(String messageId, String messageBody) {
+    public EventOutcome handle(String messageId, String messageBody) {
         return handle(messageId, messageBody, LeaseKeeper.NONE);
     }
 
     /**
      * @param messageId the SQS message's ID, the same on every delivery of that message
      * @param leases    told when work on a job starts and ends, so the caller can keep the job's lease alive meanwhile
-     * @return true when the message is fully handled and can be deleted; false to leave it on the queue so SQS
-     *         delivers it again after the visibility timeout (and eventually moves it to the dead-letter queue)
+     * @return the outcome that decides the message's fate. One that {@link EventOutcome#deletesMessage() deletes it}
+     *         when every record is done with; otherwise {@code FAILED} if an attempt failed, which the worker retries
+     *         with a backoff, or {@code BUSY}, which comes back after the visibility timeout. S3 sends one record
+     *         per message, so in practice this is that record's outcome.
      * @throws RuntimeException if the job store is unreachable or the message isn't a readable S3 event. The message
      *         stays on the queue in that case too, and the event counts as {@code error}, so the failure rate shows it.
      */
-    public boolean handle(String messageId, String messageBody, LeaseKeeper leases) {
+    public EventOutcome handle(String messageId, String messageBody, LeaseKeeper leases) {
         try {
             return handle(messageId, S3EventNotification.parse(messageBody), leases);
         } catch (RuntimeException e) {
@@ -68,18 +70,26 @@ public class UploadEventHandler {
         }
     }
 
-    private boolean handle(String messageId, S3EventNotification notification, LeaseKeeper leases) {
+    private EventOutcome handle(String messageId, S3EventNotification notification, LeaseKeeper leases) {
         if (notification.isTestEvent()) {
             log.info("Ignoring the s3:TestEvent sent when the bucket notification was configured");
-            return true;
+            return EventOutcome.IGNORED;
         }
-        boolean deleteMessage = true;
+        EventOutcome decisive = EventOutcome.IGNORED;
         for (S3EventNotification.EventRecord record : notification.records()) {
             EventOutcome outcome = process(record, messageId, leases);
             metrics.recordOutcome(outcome);
-            deleteMessage &= outcome.deletesMessage();
+            decisive = worse(decisive, outcome);
         }
-        return deleteMessage;
+        return decisive;
+    }
+
+    /** A failed attempt outranks a busy job, and both outrank any outcome that deletes the message. */
+    private static EventOutcome worse(EventOutcome a, EventOutcome b) {
+        if (a == EventOutcome.FAILED || b == EventOutcome.FAILED) {
+            return EventOutcome.FAILED;
+        }
+        return a.deletesMessage() ? b : a;
     }
 
     private EventOutcome process(S3EventNotification.EventRecord record, String messageId, LeaseKeeper leases) {

@@ -108,7 +108,12 @@ tolerate it.
 ### Retries and the dead-letter queue
 
 - A message is deleted only after its job is recorded as done. On any other outcome the message stays on the queue,
-  and SQS redelivers it once the visibility timeout expires, so the visibility timeout doubles as the retry delay.
+  and SQS redelivers it once it becomes visible again, so retries need no code of their own.
+- Failed attempts back off. The worker reads the message's `ApproximateReceiveCount` and hides it with
+  `ChangeMessageVisibility`: one visibility timeout after the first delivery, two after the second, four after the
+  third, up to `max-retry-delay` (15 min). Up to 20% is added at random, so messages that failed together, say while
+  the provider was rate limiting, don't all come back at once. A busy job keeps the plain visibility timeout, so a
+  crashed worker's job is still picked up within a minute.
 - The worker sets the visibility timeout on every `ReceiveMessage` and uses the same value as the job lease. When a
   crashed worker's message reappears, its lease has already expired, so the next delivery can take over.
 - Long work keeps its claim with a heartbeat, up to a limit. See
@@ -329,7 +334,7 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - the same event delivered three times is transcribed exactly once;
   - a duplicate that arrives while the job is still running is dropped right away;
   - a failed attempt is retried and then succeeds;
-  - an event that keeps failing lands in the dead-letter queue after 3 attempts;
+  - an event that keeps failing lands in the dead-letter queue after 3 attempts, and its retries back off;
   - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
     and the lease extensions show up in the metrics with none lost;
   - a transcription that hangs is given up on after `max-processing-time`, and the next delivery completes the job;
@@ -338,6 +343,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   job, duplicate of a job still running, redelivery of the message that holds the lease, lease lost, transient
   failure, permanent failure, unreachable job store, unreadable message, S3 test event. It also checks the metric
   that each case records, and that a lease is kept alive only while the file is being transcribed.
+- `UploadEventWorkerTest` checks both backoffs: the wait after a failed attempt (doubling per delivery, the cap,
+  the jitter) and the pause in polling after SQS errors.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
   work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
   each extension records, including when DynamoDB can't be reached.
@@ -402,6 +409,7 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.worker.concurrency` | `2` | Poller threads |
 | `pipeline.worker.visibility-timeout` | `60s` | Retry delay, and how long a crashed worker's job stays claimed |
 | `pipeline.worker.heartbeat-interval` | `20s` | How often running work extends its message and lease; shorter than the visibility timeout |
+| `pipeline.worker.max-retry-delay` | `15m` | Cap on the wait after a failed attempt, which starts at one visibility timeout and doubles per delivery |
 | `pipeline.worker.max-processing-time` | `15m` | When the heartbeat gives up on an attempt, so a hung one gets taken over; longer than the visibility timeout |
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |

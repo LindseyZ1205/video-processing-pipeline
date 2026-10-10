@@ -16,8 +16,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -206,6 +209,11 @@ class PipelineIntegrationTest {
         assertThat(status.attempts()).isEqualTo(maxReceiveCount);
         assertThat(status.error()).contains("simulated transcription failure");
         assertThat(transcriber.calls(upload.objectKey())).isEqualTo(maxReceiveCount);
+
+        // The retries back off: the second waits at least two visibility timeouts, where the first waited about one.
+        List<Instant> attempts = transcriber.callTimes(upload.objectKey());
+        assertThat(Duration.between(attempts.get(1), attempts.get(2)))
+                .isGreaterThanOrEqualTo(properties.worker().visibilityTimeout().multipliedBy(2));
     }
 
     @Test
@@ -320,6 +328,7 @@ class PipelineIntegrationTest {
     static class ScriptedTranscriptionService implements TranscriptionService {
 
         private final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
+        private final Map<String, List<Instant>> callTimes = new ConcurrentHashMap<>();
         private final Map<String, Integer> failuresLeft = new ConcurrentHashMap<>();
         private final Map<String, Duration> delays = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> hangs = new ConcurrentHashMap<>();
@@ -349,9 +358,14 @@ class PipelineIntegrationTest {
             return count == null ? 0 : count.get();
         }
 
+        List<Instant> callTimes(String objectKey) {
+            return List.copyOf(callTimes.getOrDefault(objectKey, List.of()));
+        }
+
         @Override
         public String transcribe(StoredObject object) {
             int call = calls.computeIfAbsent(object.key(), key -> new AtomicInteger()).incrementAndGet();
+            callTimes.computeIfAbsent(object.key(), key -> new CopyOnWriteArrayList<>()).add(Instant.now());
             CountDownLatch hang = hangs.get(object.key());
             if (hang != null && call == 1) {
                 try {
