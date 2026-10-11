@@ -119,7 +119,8 @@ tolerate it.
 - Long work keeps its claim with a heartbeat, up to a limit. See
   [Heartbeats for long transcriptions](#heartbeats-for-long-transcriptions).
 - After `maxReceiveCount` (3) deliveries, SQS moves the message to the dead-letter queue. From there it can be
-  inspected, and redriven once the cause is fixed.
+  inspected, and once the cause is fixed, [`scripts/redrive-dlq.sh`](scripts/redrive-dlq.sh) moves it back with an
+  SQS message move task. The [runbook](docs/runbook.md) walks through it.
 - Failures that a retry can't fix, like a file over the size limit or a format the provider rejects, mark the job
   `FAILED` and delete the message right away, so they don't use up retries.
 - If DynamoDB or S3 is unreachable, the worker doesn't guess. The message stays on the queue, and the failure-rate
@@ -313,6 +314,8 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 
 Each rule has unit tests in [`monitoring/alerts.test.yml`](monitoring/alerts.test.yml): synthetic series where it
 must fire, and where it must stay quiet. CI runs `promtool check rules` and `promtool test rules` in the `build` job.
+Every alert also has a `runbook_url` annotation that links to its section of the [runbook](docs/runbook.md): what
+the alert means, how to find the affected uploads, and how to recover.
 
 Log lines about a message or a job carry its `messageId` and `jobId` in the MDC. With
 `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` every line is JSON with those IDs as separate fields, so one upload's whole
@@ -355,7 +358,10 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 - `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys) and key sanitizing.
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
-  service's Prometheus metrics and JSON logs.
+  service's Prometheus metrics and JSON logs. It also rehearses the runbook's recovery: before the service starts, an
+  upload's event is received three times without being deleted, so SQS moves it to the dead-letter queue; after the
+  smoke test, `scripts/redrive-dlq.sh` moves it back and the upload completes.
+- `shellcheck` checks the scripts in `scripts/` in the `build` job.
 - The `docker compose + smoke test` CI job builds the image, starts the stack with `docker compose up`, and runs the
   same smoke test. On `main` it then publishes the image to GHCR. Runs on `main` never overlap, so `latest` is always
   the image of the newest commit.
@@ -430,9 +436,10 @@ src/main/java/io/github/lindseyz1205/videopipeline/
 ├── transcription/  TranscriptionService and its fake / OpenAI providers
 └── config/         AWS clients, settings, LocalStack bootstrap
 infra/terraform/    AWS resources and the service's IAM policy
-scripts/            end-to-end smoke test
+scripts/            end-to-end smoke test, dead-letter queue redrive
 e2e/                browser test of the demo page (Playwright)
 monitoring/         Prometheus alert rules and their unit tests
+docs/               runbook for the alerts, demo screenshot
 ```
 
 ## Not covered yet

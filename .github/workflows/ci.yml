@@ -22,6 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check the shell scripts
+        run: shellcheck scripts/*.sh
+
       # The alert rules must parse, and their unit tests (monitoring/alerts.test.yml) must pass.
       - name: Check and test the alert rules
         run: |
@@ -112,6 +115,36 @@ jobs:
           tflocal apply -auto-approve -input=false
           terraform output -json service_environment | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
 
+      # Sets up the runbook's recovery path (docs/runbook.md): an upload whose event already failed three deliveries.
+      # S3 publishes the event, it is received three times without being deleted, as if the worker had been broken,
+      # and SQS moves it to the dead-letter queue. It is redriven after the smoke test.
+      - name: Put an upload event in the dead-letter queue
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_ENDPOINT_URL: http://localhost:4566
+        run: |
+          export AWS_DEFAULT_REGION="$PIPELINE_AWS_REGION"
+          aws configure set default.s3.addressing_style path
+          upload_id="$(cat /proc/sys/kernel/random/uuid)"
+          echo "REDRIVE_UPLOAD_ID=$upload_id" >> "$GITHUB_ENV"
+          echo "redrive check" > clip.mp4
+          aws s3 cp clip.mp4 "s3://$PIPELINE_BUCKET/uploads/redrive-check/$upload_id/clip.mp4" --content-type video/mp4
+          queue_url="$(aws sqs get-queue-url --queue-name "$PIPELINE_QUEUE_NAME" --query QueueUrl --output text)"
+          dlq_url="$(aws sqs get-queue-url --queue-name "$PIPELINE_QUEUE_DEADLETTERNAME" --query QueueUrl --output text)"
+          for _ in $(seq 10); do
+            aws sqs receive-message --queue-url "$queue_url" --max-number-of-messages 10 --visibility-timeout 0 \
+              --wait-time-seconds 2 > /dev/null
+            bodies="$(aws sqs receive-message --queue-url "$dlq_url" --max-number-of-messages 10 --visibility-timeout 0 \
+              --query 'Messages[].Body' --output text)"
+            if grep -q "$upload_id" <<< "$bodies"; then
+              echo "the event for upload $upload_id is in the dead-letter queue"
+              exit 0
+            fi
+          done
+          echo "the event never reached the dead-letter queue" >&2
+          exit 1
+
       - name: Start the service
         env:
           PIPELINE_AWS_ENDPOINT: http://localhost:4566
@@ -125,6 +158,26 @@ jobs:
 
       - name: Smoke test
         run: ./scripts/smoke-test.sh
+
+      - name: Redrive the dead-letter queue
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_ENDPOINT_URL: http://localhost:4566
+        run: |
+          export AWS_DEFAULT_REGION="$PIPELINE_AWS_REGION"
+          ./scripts/redrive-dlq.sh
+          status=""
+          for _ in $(seq 60); do
+            status="$(curl -fsS "http://localhost:8080/api/uploads/$REDRIVE_UPLOAD_ID" | jq -r .status)" || status="not found"
+            if [ "$status" = "COMPLETED" ]; then
+              echo "the redriven upload $REDRIVE_UPLOAD_ID completed"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the redriven upload did not complete within 60s (last status: $status)" >&2
+          exit 1
 
       - name: Check metrics and structured logs
         run: |
