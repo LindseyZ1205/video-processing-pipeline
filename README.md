@@ -80,6 +80,21 @@ With a presigned URL the service only signs a request, and S3 takes the bytes.
   the real size with `HeadObject` before it does any work. To enforce the limit inside S3, you would use a
   presigned POST policy with `content-length-range`.
 
+### Idempotent upload requests
+
+A client whose `POST /api/uploads` times out can't tell whether the upload was created, so it retries, and without
+protection every retry creates another job. A request may carry an `Idempotency-Key` header, as with Stripe's API:
+
+- **One transaction.** The pending job and a record of the key, `{userId}#{key}`, are written with a single
+  `TransactWriteItems`, each conditioned on not existing yet. Either both exist or neither does, so even concurrent
+  retries create one job.
+- **A retry gets the same upload.** When the key exists, the earlier upload comes back with the same upload ID and
+  object key, a freshly signed URL, and `Idempotent-Replayed: true`.
+- **A key means one request.** The record holds a SHA-256 hash of the file name, type and size. The same key with
+  different details gets `422`. A retry that races the first request, before it committed, gets `409` and retries.
+- **Cheap to keep.** Key records live in the jobs table under their own prefix (job IDs are UUIDs, so they can't
+  collide) and expire through the same TTL after 24 hours. The transaction costs two writes instead of one.
+
 ### At-least-once delivery, made safe with idempotency
 
 S3 event notifications and SQS standard queues both deliver *at least once*. The same upload can arrive twice, and
@@ -219,6 +234,11 @@ Location: /api/uploads/0f8fad5b-d9cb-469f-a165-70867728950e
 ```
 
 Only `audio/*` and `video/*` types are accepted, up to 100 MB. Anything else gets `400` with a problem-details body.
+To make retries safe, send an `Idempotency-Key` header: up to 128 letters, digits, `-`, `_`, `.` or `:`, such as a
+UUID. A retry with the same key and the same details returns the same upload with `Idempotent-Replayed: true`. The
+same key with different details gets `422`, and a retry racing the first request may get `409`. Keys are kept for 24
+hours, per `userId`.
+
 Then upload the file with the returned method, URL and headers:
 
 ```bash
@@ -335,6 +355,9 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   checks that:
   - an uploaded file ends up `COMPLETED` with its transcript;
   - the same event delivered three times is transcribed exactly once;
+  - a retried upload request with the same `Idempotency-Key` gets the same upload, and its replayed URL works; the
+    key can't be reused for different details, belongs to one user, and five concurrent requests with it create one
+    upload;
   - a duplicate that arrives while the job is still running is dropped right away;
   - a failed attempt is retried and then succeeds;
   - an event that keeps failing lands in the dead-letter queue after 3 attempts, and its retries back off;

@@ -11,6 +11,17 @@ public interface JobStore {
     void createPending(String jobId, String bucket, String objectKey);
 
     /**
+     * {@link #createPending} for a request that carries an idempotency key. The job and a record of the key are written
+     * in one transaction, so a retried request can never create a second job. When the key was used before, nothing is
+     * written and the earlier record comes back instead.
+     *
+     * @param idempotencyKey already scoped to its caller, so two users' keys can't collide
+     * @throws IdempotencyKeyInUseException if a request with the same key is being written at this very moment
+     */
+    Optional<IdempotencyRecord> createPendingOnce(String jobId, String bucket, String objectKey, String idempotencyKey,
+            String requestHash);
+
+    /**
      * Atomically claims the job for processing. This succeeds when the job is new, pending, failed, or processing
      * under an expired lease. It returns empty when the job is completed or another worker holds a live lease.
      *

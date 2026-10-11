@@ -3,6 +3,8 @@ package io.github.lindseyz1205.videopipeline;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import io.github.lindseyz1205.videopipeline.job.JobStatus;
 import io.github.lindseyz1205.videopipeline.transcription.StoredObject;
@@ -10,6 +12,7 @@ import io.github.lindseyz1205.videopipeline.transcription.TranscriptionService;
 import io.github.lindseyz1205.videopipeline.upload.CreateUploadRequest;
 import io.github.lindseyz1205.videopipeline.upload.CreateUploadResponse;
 import io.github.lindseyz1205.videopipeline.upload.UploadStatusResponse;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,10 +22,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
@@ -31,7 +37,11 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -88,6 +98,9 @@ class PipelineIntegrationTest {
 
     @Autowired
     private PipelineProperties properties;
+
+    @Autowired
+    private ObjectMapper json;
 
     private final HttpClient http = HttpClient.newHttpClient();
 
@@ -240,6 +253,66 @@ class PipelineIntegrationTest {
     }
 
     @Test
+    void aRetriedRequestWithTheSameIdempotencyKeyGetsTheSameUpload() throws Exception {
+        String key = UUID.randomUUID().toString();
+        ResponseEntity<String> first = requestUpload("test-user", "retried.mp4", key);
+        ResponseEntity<String> retry = requestUpload("test-user", "retried.mp4", key);
+
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(first.getHeaders().containsKey("Idempotent-Replayed")).isFalse();
+        assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(retry.getHeaders().getFirst("Idempotent-Replayed")).isEqualTo("true");
+        assertThat(upload(retry).uploadId()).isEqualTo(upload(first).uploadId());
+        assertThat(upload(retry).objectKey()).isEqualTo(upload(first).objectKey());
+
+        // The replayed URL works: the file uploaded through it completes the one job.
+        putFile(upload(retry));
+        assertThat(awaitStatus(upload(first).uploadId(), JobStatus.COMPLETED).attempts()).isEqualTo(1);
+    }
+
+    @Test
+    void anIdempotencyKeyCannotBeReusedForADifferentUpload() {
+        String key = UUID.randomUUID().toString();
+        assertThat(requestUpload("test-user", "first.mp4", key).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        assertThat(requestUpload("test-user", "second.mp4", key).getStatusCode())
+                .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    @Test
+    void idempotencyKeysBelongToOneUser() {
+        String key = UUID.randomUUID().toString();
+        ResponseEntity<String> alice = requestUpload("alice", "notes.mp4", key);
+        ResponseEntity<String> bob = requestUpload("bob", "notes.mp4", key);
+
+        assertThat(bob.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(upload(bob).uploadId()).isNotEqualTo(upload(alice).uploadId());
+    }
+
+    @Test
+    void concurrentRequestsWithTheSameIdempotencyKeyCreateOneUpload() {
+        String key = UUID.randomUUID().toString();
+        List<ResponseEntity<String>> firstTries = IntStream.range(0, 5)
+                .mapToObj(i -> CompletableFuture.supplyAsync(() -> requestUpload("test-user", "race.mp4", key)))
+                .toList()
+                .stream()
+                .map(CompletableFuture::join)
+                .toList();
+        // 409 means another request with the key was mid-write. A client retries it, and so does this test.
+        List<ResponseEntity<String>> responses = firstTries.stream()
+                .map(response -> response.getStatusCode() == HttpStatus.CONFLICT
+                        ? requestUpload("test-user", "race.mp4", key)
+                        : response)
+                .toList();
+
+        assertThat(responses)
+                .allSatisfy(response -> assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED));
+        assertThat(responses.stream().map(response -> upload(response).uploadId()).distinct()).hasSize(1);
+        assertThat(responses.stream().filter(response -> !response.getHeaders().containsKey("Idempotent-Replayed")))
+                .hasSize(1);
+    }
+
+    @Test
     void refusesFilesThatCannotBeTranscribed() {
         var request = new CreateUploadRequest("test-user", "notes.pdf", "application/pdf", 1_000);
 
@@ -254,6 +327,23 @@ class PipelineIntegrationTest {
                 api.postForEntity("/api/uploads", request, CreateUploadResponse.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         return response.getBody();
+    }
+
+    /** Requests an upload with an Idempotency-Key, the way a client that retries would. */
+    private ResponseEntity<String> requestUpload(String userId, String fileName, String idempotencyKey) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Idempotency-Key", idempotencyKey);
+        var request = new CreateUploadRequest(userId, fileName, "video/mp4", FILE_CONTENT.length);
+        return api.exchange("/api/uploads", HttpMethod.POST, new HttpEntity<>(request, headers), String.class);
+    }
+
+    private CreateUploadResponse upload(ResponseEntity<String> response) {
+        try {
+            return json.readValue(response.getBody(), CreateUploadResponse.class);
+        } catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     /** Uploads the way a browser would: straight to S3 with the presigned URL and the required headers. */
