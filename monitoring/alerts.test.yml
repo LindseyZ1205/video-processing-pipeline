@@ -25,7 +25,8 @@ tests:
               severity: page
             exp_annotations:
               summary: Upload events are waiting in the dead-letter queue
-              description: 1 upload event(s) failed processing too many times. Check the job's lastError, fix the cause, then redrive the dead-letter queue.
+              description: 1 upload event(s) failed processing too many times. Check the job's lastError, fix the cause, then redrive the dead-letter queue with scripts/redrive-dlq.sh.
+              runbook_url: https://github.com/LindseyZ1205/video-processing-pipeline/blob/main/docs/runbook.md#uploadeventsindeadletterqueue
 
   - name: a backlog on the event queue alone is not a dead-letter alert
     interval: 1m
@@ -54,6 +55,7 @@ tests:
               severity: warn
             exp_annotations:
               summary: More than 10% of upload event attempts are failing
+              runbook_url: https://github.com/LindseyZ1205/video-processing-pipeline/blob/main/docs/runbook.md#uploadeventsfailing
 
   - name: events that error out count as failures
     interval: 1m
@@ -70,6 +72,7 @@ tests:
               severity: warn
             exp_annotations:
               summary: More than 10% of upload event attempts are failing
+              runbook_url: https://github.com/LindseyZ1205/video-processing-pipeline/blob/main/docs/runbook.md#uploadeventsfailing
 
   - name: an occasional failure stays quiet
     interval: 1m
@@ -103,6 +106,7 @@ tests:
               severity: warn
             exp_annotations:
               summary: Uploads wait more than 2 minutes (p95) before a worker starts on them
+              runbook_url: https://github.com/LindseyZ1205/video-processing-pipeline/blob/main/docs/runbook.md#slowuploadpickup
 
   - name: fast pickups stay quiet
     interval: 1m
@@ -133,6 +137,7 @@ tests:
               severity: page
             exp_annotations:
               summary: The worker has been failing to poll SQS for 10 minutes
+              runbook_url: https://github.com/LindseyZ1205/video-processing-pipeline/blob/main/docs/runbook.md#workercannotreachsqs
 
   - name: no receive errors stay quiet
     interval: 1m
@@ -158,6 +163,7 @@ tests:
             exp_annotations:
               summary: Workers keep losing job leases while transcribing
               description: Another worker took a job over because its lease ran out before the heartbeat could extend it, so the same file gets transcribed twice. Look for failed lease extensions, workers short of CPU, or a heartbeat interval too close to the visibility timeout.
+              runbook_url: https://github.com/LindseyZ1205/video-processing-pipeline/blob/main/docs/runbook.md#jobleaseskeepgettinglost
 
   - name: a single lost lease among healthy extensions stays quiet
     interval: 1m
