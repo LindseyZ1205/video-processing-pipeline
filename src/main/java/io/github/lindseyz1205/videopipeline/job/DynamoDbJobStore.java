@@ -17,8 +17,12 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
+import software.amazon.awssdk.services.dynamodb.model.Put;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
+import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemResponse;
 
@@ -46,6 +50,15 @@ public class DynamoDbJobStore implements JobStore {
     private static final String LAST_ERROR = "lastError";
     private static final String CREATED_AT = "createdAt";
     private static final String UPDATED_AT = "updatedAt";
+    private static final String UPLOAD_ID = "uploadId";
+    private static final String REQUEST_HASH = "requestHash";
+    /**
+     * Idempotency keys live in the jobs table under their own key prefix. Job IDs are UUIDs, so the two can't collide,
+     * and the API never reads anything but a UUID.
+     */
+    private static final String IDEMPOTENCY_KEY_PREFIX = "idempotency#";
+    /** How long a key keeps returning the same upload, as with Stripe's idempotency keys. */
+    private static final Duration IDEMPOTENCY_KEY_RETENTION = Duration.ofHours(24);
 
     private static final int MAX_ERROR_LENGTH = 1_000;
 
@@ -67,7 +80,38 @@ public class DynamoDbJobStore implements JobStore {
 
     @Override
     public void createPending(String jobId, String bucket, String objectKey) {
+        dynamo.putItem(PutItemRequest.builder()
+                .tableName(table)
+                .item(pendingJob(jobId, bucket, objectKey, clock.instant()))
+                .conditionExpression("attribute_not_exists(#jobId)")
+                .expressionAttributeNames(names(JOB_ID))
+                .build());
+    }
+
+    @Override
+    public Optional<IdempotencyRecord> createPendingOnce(String jobId, String bucket, String objectKey,
+            String idempotencyKey, String requestHash) {
         Instant now = clock.instant();
+        Map<String, AttributeValue> keyRecord = Map.of(
+                JOB_ID, s(IDEMPOTENCY_KEY_PREFIX + idempotencyKey),
+                UPLOAD_ID, s(jobId),
+                OBJECT_KEY, s(objectKey),
+                REQUEST_HASH, s(requestHash),
+                CREATED_AT, s(now.toString()),
+                EXPIRES_AT, n(now.plus(IDEMPOTENCY_KEY_RETENTION).getEpochSecond()));
+        try {
+            dynamo.transactWriteItems(TransactWriteItemsRequest.builder()
+                    .transactItems(putIfAbsent(pendingJob(jobId, bucket, objectKey, now)), putIfAbsent(keyRecord))
+                    .build());
+            return Optional.empty();
+        } catch (TransactionCanceledException e) {
+            // Usually the key exists already. If it doesn't, a concurrent request holds it and hasn't committed yet.
+            return Optional.of(findIdempotencyRecord(idempotencyKey)
+                    .orElseThrow(IdempotencyKeyInUseException::new));
+        }
+    }
+
+    private Map<String, AttributeValue> pendingJob(String jobId, String bucket, String objectKey, Instant now) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(JOB_ID, s(jobId));
         item.put(STATUS, s(JobStatus.PENDING_UPLOAD.name()));
@@ -77,13 +121,32 @@ public class DynamoDbJobStore implements JobStore {
         item.put(CREATED_AT, s(now.toString()));
         item.put(UPDATED_AT, s(now.toString()));
         item.put(EXPIRES_AT, n(now.plus(retention).getEpochSecond()));
+        return item;
+    }
 
-        dynamo.putItem(PutItemRequest.builder()
+    private TransactWriteItem putIfAbsent(Map<String, AttributeValue> item) {
+        return TransactWriteItem.builder()
+                .put(Put.builder()
+                        .tableName(table)
+                        .item(item)
+                        .conditionExpression("attribute_not_exists(#jobId)")
+                        .expressionAttributeNames(names(JOB_ID))
+                        .build())
+                .build();
+    }
+
+    private Optional<IdempotencyRecord> findIdempotencyRecord(String idempotencyKey) {
+        GetItemResponse response = dynamo.getItem(GetItemRequest.builder()
                 .tableName(table)
-                .item(item)
-                .conditionExpression("attribute_not_exists(#jobId)")
-                .expressionAttributeNames(names(JOB_ID))
+                .key(key(IDEMPOTENCY_KEY_PREFIX + idempotencyKey))
+                .consistentRead(true)
                 .build());
+        if (!response.hasItem() || response.item().isEmpty()) {
+            return Optional.empty();
+        }
+        Map<String, AttributeValue> item = response.item();
+        return Optional.of(new IdempotencyRecord(
+                string(item, UPLOAD_ID), string(item, OBJECT_KEY), string(item, REQUEST_HASH)));
     }
 
     @Override
