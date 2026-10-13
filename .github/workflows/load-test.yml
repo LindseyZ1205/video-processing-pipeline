@@ -1,0 +1,90 @@
+name: Load test
+
+# A measurement, not a gate. Run it by hand (Actions > Load test > Run workflow, or `gh workflow run load-test.yml`) to
+# see how the whole pipeline holds up at a few arrival rates on one runner. The results land in the run summary.
+on:
+  workflow_dispatch:
+    inputs:
+      rates:
+        description: Uploads started per second, one k6 run for each value
+        default: "10 20 40 80"
+      duration:
+        description: How long each rate is held
+        default: "60s"
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RATES: ${{ inputs.rates || '10 20 40 80' }}
+      DURATION: ${{ inputs.duration || '60s' }}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localhost:4566
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image and start the stack
+        run: docker compose up --build --detach --wait
+
+      - name: Wait for the service
+        run: timeout 120 bash -c 'until curl -fsS http://localhost:8080/actuator/health | grep -q UP; do sleep 2; done'
+
+      - name: Run k6 at each rate
+        run: |
+          mkdir -p results
+          queue_url="$(aws sqs get-queue-url --queue-name video-upload-events --query QueueUrl --output text)"
+          for rate in $RATES; do
+            echo "::group::$rate uploads/s for $DURATION"
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              -v "$PWD/load:/load:ro" -v "$PWD/results:/results" \
+              -e RATE="$rate" -e DURATION="$DURATION" \
+              grafana/k6:1.8.1 run --quiet /load/upload.js
+            echo "::endgroup::"
+            # Start the next rate on an empty queue, so a backlog doesn't spill over into its numbers.
+            for _ in $(seq 120); do
+              depth="$(aws sqs get-queue-attributes --queue-url "$queue_url" \
+                --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+                --query 'Attributes.[ApproximateNumberOfMessages, ApproximateNumberOfMessagesNotVisible]' --output text)"
+              [ "$depth" = "$(printf '0\t0')" ] && break
+              sleep 1
+            done
+          done
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "### Load test on one runner: $(nproc) vCPU, $(free -g | awk '/^Mem:/ {print $2}') GB"
+            echo
+            echo "docker compose stack (LocalStack, fake transcription provider, worker concurrency 2), each rate held"
+            echo "for $DURATION. Pipeline latency runs from S3 having the file until the transcript is stored."
+            echo
+            echo "| Uploads/s | Started | Completed | Failed | Dropped | Latency p50 | p95 | p99 | max |"
+            echo "|---|---|---|---|---|---|---|---|---|"
+            for file in $(ls results/summary-*.json 2> /dev/null | sort -t- -k2 -n); do
+              jq -r 'def ms: if . == null then "-" else "\(. | round) ms" end;
+                "| \(.rate) | \(.started) | \(.completed) | \(.failed) | \(.dropped) | \(.latencyMs.p50 | ms) | \(.latencyMs.p95 | ms) | \(.latencyMs.p99 | ms) | \(.latencyMs.max | ms) |"' "$file"
+            done
+            echo
+            echo "Outcomes the worker recorded over the whole run:"
+            echo
+            curl -fsS http://localhost:8080/actuator/prometheus \
+              | sed -nE 's/^pipeline_events_total\{.*outcome="([a-z]+)".*\} ([0-9.]+)$/- \1: \2/p'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: load-test-results
+          path: results/
+
+      - name: Service log
+        if: failure()
+        run: docker compose logs --no-color app | tail -200

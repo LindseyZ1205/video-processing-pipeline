@@ -421,6 +421,35 @@ uploads the HTML report as the `coverage-report` artifact.
 - **CodeQL** scans the Java code on every PR, on `main`, and every Monday, so new queries also run against code
   that hasn't changed.
 
+## Performance
+
+[`load/upload.js`](load/upload.js) is a k6 scenario that drives the whole pipeline at a fixed arrival rate. Every
+iteration requests an upload, PUTs the file to S3, and waits for the transcript. Pipeline latency runs from S3 having
+the file until the transcript is stored. It is taken from the job's own timestamp, so the client's polling interval
+doesn't skew it. [`load-test.yml`](.github/workflows/load-test.yml) runs it by hand, one minute per rate, against the
+docker compose stack on a single GitHub-hosted runner (4 vCPU).
+
+[Run 38325430484](https://github.com/LindseyZ1205/video-processing-pipeline/actions/runs/38325430484), 2026-10-13:
+
+| Uploads started/s | Completed | Dropped by k6 | Latency p50 | p95 | p99 | max |
+|---|---|---|---|---|---|---|
+| 10 | 600 of 600 | 0 | 16 ms | 25 ms | 228 ms | 393 ms |
+| 20 | 1,200 of 1,200 | 0 | 14 ms | 18 ms | 31 ms | 178 ms |
+| 40 | 2,401 of 2,401 | 0 | 15 ms | 389 ms | 458 ms | 485 ms |
+| 80 | 419 of 419 | 4,381 | 82 s | 107 s | 107 s | 107 s |
+
+- Every upload that k6 started was processed exactly once. The worker recorded 4,620 `processed` events for 4,620
+  uploads, and no duplicates, retries or failures.
+- Up to 40 uploads/s, latency stays in the tens of milliseconds, and queueing starts to show in the p95 at 40/s.
+  Somewhere between 40 and 80 uploads/s this setup falls over: at 80/s a backlog built up, k6's 300 virtual users all
+  ended up waiting on slow uploads, it dropped 4,381 starts, and latency climbed past 100 s.
+- Where exactly it falls over, and which part saturates first, this run can't say. k6 and its status polling,
+  LocalStack (including the DynamoDB that the API and the worker share) and the service all share four vCPUs, and the
+  polling grows with the backlog. So these numbers are a baseline for comparing changes on the same setup, not a
+  capacity estimate for AWS, where the transcription provider would also be a real one.
+
+To rerun it, or to probe other rates: `gh workflow run load-test.yml -f rates="40 50 60 70"`.
+
 ## Configuration
 
 All settings live under `pipeline.*` in [`application.yml`](src/main/resources/application.yml).
@@ -462,6 +491,7 @@ infra/terraform/    AWS resources and the service's IAM policy
 scripts/            end-to-end smoke test, dead-letter queue redrive
 e2e/                browser test of the demo page (Playwright)
 monitoring/         Prometheus alert rules and their unit tests
+load/               k6 load test of the whole pipeline
 docs/               runbook for the alerts, demo screenshot
 ```
 
