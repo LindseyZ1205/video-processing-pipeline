@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import io.github.lindseyz1205.videopipeline.job.JobStatus;
+import io.github.lindseyz1205.videopipeline.transcription.RetryLaterException;
 import io.github.lindseyz1205.videopipeline.transcription.StoredObject;
 import io.github.lindseyz1205.videopipeline.transcription.TranscriptionService;
 import io.github.lindseyz1205.videopipeline.upload.CreateUploadRequest;
@@ -161,6 +162,21 @@ class PipelineIntegrationTest {
         UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
         assertThat(done.attempts()).isEqualTo(2);
         assertThat(transcriber.calls(upload.objectKey())).isEqualTo(2);
+    }
+
+    @Test
+    void aRateLimitedAttemptIsRetriedNoSoonerThanTheProviderAsked() throws Exception {
+        CreateUploadResponse upload = createUpload("rate-limited.mp4");
+        // Longer than the backoff after a first delivery: one 3 s visibility timeout, plus up to 20%.
+        Duration retryAfter = Duration.ofSeconds(8);
+        transcriber.rateLimitFirstCall(upload.objectKey(), retryAfter);
+
+        putFile(upload);
+
+        UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
+        assertThat(done.attempts()).isEqualTo(2);
+        List<Instant> attempts = transcriber.callTimes(upload.objectKey());
+        assertThat(Duration.between(attempts.get(0), attempts.get(1))).isGreaterThanOrEqualTo(retryAfter);
     }
 
     @Test
@@ -418,17 +434,26 @@ class PipelineIntegrationTest {
         }
     }
 
-    /** Stands in for a real provider: counts calls per file, and can be told to fail, to be slow or to hang. */
+    /**
+     * Stands in for a real provider: counts calls per file, and can be told to fail, to rate limit, to be slow or to
+     * hang.
+     */
     static class ScriptedTranscriptionService implements TranscriptionService {
 
         private final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
         private final Map<String, List<Instant>> callTimes = new ConcurrentHashMap<>();
         private final Map<String, Integer> failuresLeft = new ConcurrentHashMap<>();
+        private final Map<String, Duration> rateLimits = new ConcurrentHashMap<>();
         private final Map<String, Duration> delays = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> hangs = new ConcurrentHashMap<>();
 
         void failNextCalls(String objectKey, int times) {
             failuresLeft.put(objectKey, times);
+        }
+
+        /** The first call for the file fails the way a rate-limited provider does, asking to retry after a while. */
+        void rateLimitFirstCall(String objectKey, Duration retryAfter) {
+            rateLimits.put(objectKey, retryAfter);
         }
 
         void delay(String objectKey, Duration delay) {
@@ -468,6 +493,10 @@ class PipelineIntegrationTest {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException("interrupted while simulating a hung transcription", e);
                 }
+            }
+            Duration retryAfter = rateLimits.get(object.key());
+            if (retryAfter != null && call == 1) {
+                throw new RetryLaterException("simulated rate limit", retryAfter, null);
             }
             Integer left = failuresLeft.computeIfPresent(object.key(), (key, remaining) -> remaining - 1);
             if (left != null && left >= 0) {

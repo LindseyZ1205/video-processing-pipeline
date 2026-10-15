@@ -2,6 +2,7 @@ package io.github.lindseyz1205.videopipeline.transcription;
 
 import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import java.net.http.HttpClient;
+import java.time.Clock;
 import java.time.Duration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -27,8 +28,8 @@ public class TranscriptionConfiguration {
     @Bean
     @ConditionalOnProperty(name = "pipeline.transcription.provider", havingValue = "openai")
     public TranscriptionService openAiTranscriptionService(RestClient.Builder restClientBuilder, S3Client s3,
-            PipelineProperties properties) {
-        return openAi(restClientBuilder, s3, properties.transcription().openai());
+            PipelineProperties properties, Clock clock) {
+        return openAi(restClientBuilder, s3, properties.transcription().openai(), clock);
     }
 
     /**
@@ -36,10 +37,10 @@ public class TranscriptionConfiguration {
      * thread for good.
      */
     static OpenAiTranscriptionService openAi(RestClient.Builder restClientBuilder, S3Client s3,
-            PipelineProperties.Transcription.OpenAi settings) {
+            PipelineProperties.Transcription.OpenAi settings, Clock clock) {
         JdkClientHttpRequestFactory requestFactory =
                 new JdkClientHttpRequestFactory(HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build());
         requestFactory.setReadTimeout(settings.timeout());
-        return new OpenAiTranscriptionService(restClientBuilder.requestFactory(requestFactory), s3, settings);
+        return new OpenAiTranscriptionService(restClientBuilder.requestFactory(requestFactory), s3, settings, clock);
     }
 }

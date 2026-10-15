@@ -15,6 +15,8 @@ class UploadEventWorkerTest {
     private static final Duration MAX_RETRY_DELAY = Duration.ofMinutes(15);
     /** A queue without a redrive policy, so no delivery is the last one. */
     private static final int NO_LIMIT = 0;
+    /** The provider didn't say how long to wait. */
+    private static final Duration NO_RETRY_AFTER = null;
 
     @Test
     void aFailedAttemptWaitsOneVisibilityTimeoutAfterItsFirstDelivery() {
@@ -36,18 +38,31 @@ class UploadEventWorkerTest {
 
     @Test
     void jitterAddsUpToAFifth() {
-        assertThat(UploadEventWorker.retryDelay(2, NO_LIMIT, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0.5))
-                .isEqualTo(Duration.ofSeconds(132));
-        assertThat(UploadEventWorker.retryDelay(2, NO_LIMIT, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0.9999))
-                .isEqualTo(Duration.ofSeconds(144));
+        assertThat(retryDelay(2, NO_LIMIT, NO_RETRY_AFTER, 0.5)).isEqualTo(Duration.ofSeconds(132));
+        assertThat(retryDelay(2, NO_LIMIT, NO_RETRY_AFTER, 0.9999)).isEqualTo(Duration.ofSeconds(144));
     }
 
     @Test
     void theLastDeliveryGoesStraightToTheDeadLetterQueue() {
-        assertThat(UploadEventWorker.retryDelay(2, 3, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0))
-                .isEqualTo(Duration.ofSeconds(120));
-        assertThat(UploadEventWorker.retryDelay(3, 3, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0)).isZero();
-        assertThat(UploadEventWorker.retryDelay(4, 3, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0)).isZero();
+        assertThat(retryDelay(2, 3, NO_RETRY_AFTER, 0)).isEqualTo(Duration.ofSeconds(120));
+        assertThat(retryDelay(3, 3, NO_RETRY_AFTER, 0)).isZero();
+        assertThat(retryDelay(4, 3, NO_RETRY_AFTER, 0)).isZero();
+    }
+
+    @Test
+    void theProviderCanAskForALongerWait() {
+        assertThat(retryDelay(1, 3, Duration.ofMinutes(5), 0)).isEqualTo(Duration.ofMinutes(5));
+        // Rounded up, so the retry never comes before the provider asked; the jitter still adds up to a fifth.
+        assertThat(retryDelay(1, 3, Duration.ofMillis(90_001), 0)).isEqualTo(Duration.ofSeconds(91));
+        assertThat(retryDelay(1, 3, Duration.ofMinutes(5), 0.5)).isEqualTo(Duration.ofSeconds(330));
+    }
+
+    @Test
+    void theProviderCannotShortenTheWaitOrLiftTheCap() {
+        assertThat(retryDelay(2, 3, Duration.ofSeconds(1), 0)).isEqualTo(Duration.ofSeconds(120));
+        assertThat(retryDelay(1, 3, Duration.ofDays(1), 0)).isEqualTo(MAX_RETRY_DELAY);
+        // Nor hold back the dead-letter queue: no attempt follows the last delivery.
+        assertThat(retryDelay(3, 3, Duration.ofMinutes(5), 0)).isZero();
     }
 
     @Test
@@ -76,6 +91,11 @@ class UploadEventWorkerTest {
     }
 
     private static Duration retryDelay(int receiveCount) {
-        return UploadEventWorker.retryDelay(receiveCount, NO_LIMIT, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0);
+        return retryDelay(receiveCount, NO_LIMIT, NO_RETRY_AFTER, 0);
+    }
+
+    private static Duration retryDelay(int receiveCount, int maxReceiveCount, Duration retryAfter, double random) {
+        return UploadEventWorker.retryDelay(receiveCount, maxReceiveCount, retryAfter, VISIBILITY_TIMEOUT,
+                MAX_RETRY_DELAY, random);
     }
 }

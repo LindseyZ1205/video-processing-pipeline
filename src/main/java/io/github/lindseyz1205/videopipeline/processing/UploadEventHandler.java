@@ -4,10 +4,12 @@ import io.github.lindseyz1205.videopipeline.job.Job;
 import io.github.lindseyz1205.videopipeline.job.JobStatus;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
+import io.github.lindseyz1205.videopipeline.transcription.RetryLaterException;
 import io.github.lindseyz1205.videopipeline.transcription.StoredObject;
 import io.github.lindseyz1205.videopipeline.transcription.TranscriptionService;
 import io.github.lindseyz1205.videopipeline.transcription.UnprocessableMediaException;
 import io.github.lindseyz1205.videopipeline.upload.UploadKey;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -47,7 +49,7 @@ public class UploadEventHandler {
     }
 
     /** {@link #handle(String, String, LeaseKeeper)} without keeping leases alive: each lease keeps its first length. */
-    public EventOutcome handle(String messageId, String messageBody) {
+    public Decision handle(String messageId, String messageBody) {
         return handle(messageId, messageBody, LeaseKeeper.NONE);
     }
 
@@ -57,11 +59,12 @@ public class UploadEventHandler {
      * @return the outcome that decides the message's fate. One that {@link EventOutcome#deletesMessage() deletes it}
      *         when every record is done with; otherwise {@code FAILED} if an attempt failed, which the worker retries
      *         with a backoff, or {@code BUSY}, which comes back after the visibility timeout. S3 sends one record
-     *         per message, so in practice this is that record's outcome.
+     *         per message, so in practice this is that record's outcome. A failed attempt also carries how long the
+     *         provider asked to wait, if it said.
      * @throws RuntimeException if the job store is unreachable or the message isn't a readable S3 event. The message
      *         stays on the queue in that case too, and the event counts as {@code error}, so the failure rate shows it.
      */
-    public EventOutcome handle(String messageId, String messageBody, LeaseKeeper leases) {
+    public Decision handle(String messageId, String messageBody, LeaseKeeper leases) {
         try {
             return handle(messageId, S3EventNotification.parse(messageBody), leases);
         } catch (RuntimeException e) {
@@ -70,18 +73,20 @@ public class UploadEventHandler {
         }
     }
 
-    private EventOutcome handle(String messageId, S3EventNotification notification, LeaseKeeper leases) {
+    private Decision handle(String messageId, S3EventNotification notification, LeaseKeeper leases) {
         if (notification.isTestEvent()) {
             log.info("Ignoring the s3:TestEvent sent when the bucket notification was configured");
-            return EventOutcome.IGNORED;
+            return Decision.of(EventOutcome.IGNORED);
         }
         EventOutcome decisive = EventOutcome.IGNORED;
+        Duration retryAfter = null;
         for (S3EventNotification.EventRecord record : notification.records()) {
-            EventOutcome outcome = process(record, messageId, leases);
-            metrics.recordOutcome(outcome);
-            decisive = worse(decisive, outcome);
+            Decision decision = process(record, messageId, leases);
+            metrics.recordOutcome(decision.outcome());
+            decisive = worse(decisive, decision.outcome());
+            retryAfter = longer(retryAfter, decision.retryAfter());
         }
-        return decisive;
+        return new Decision(decisive, retryAfter);
     }
 
     /** A failed attempt outranks a busy job, and both outrank any outcome that deletes the message. */
@@ -92,16 +97,21 @@ public class UploadEventHandler {
         return a.deletesMessage() ? b : a;
     }
 
-    private EventOutcome process(S3EventNotification.EventRecord record, String messageId, LeaseKeeper leases) {
+    /** Only failed records carry a wait, and the message waits for the longest. */
+    private static Duration longer(Duration a, Duration b) {
+        return a == null || b != null && b.compareTo(a) > 0 ? b : a;
+    }
+
+    private Decision process(S3EventNotification.EventRecord record, String messageId, LeaseKeeper leases) {
         if (!record.isObjectCreated()) {
             log.warn("Ignoring unexpected event {}", record.eventName());
-            return EventOutcome.IGNORED;
+            return Decision.of(EventOutcome.IGNORED);
         }
         String objectKey = record.objectKey();
         Optional<UploadKey> upload = UploadKey.parse(objectKey);
         if (upload.isEmpty()) {
             log.warn("Ignoring {}: not an upload created through the API", objectKey);
-            return EventOutcome.IGNORED;
+            return Decision.of(EventOutcome.IGNORED);
         }
         String jobId = upload.get().uploadId();
         // Every log line about this job carries its ID (a field of its own in structured logs).
@@ -110,11 +120,11 @@ public class UploadEventHandler {
         }
     }
 
-    private EventOutcome process(String jobId, S3EventNotification.EventRecord record, String objectKey,
+    private Decision process(String jobId, S3EventNotification.EventRecord record, String objectKey,
             String messageId, LeaseKeeper leases) {
         Optional<Lease> acquired = jobs.tryAcquire(jobId, record.bucketName(), objectKey, messageId);
         if (acquired.isEmpty()) {
-            return lostClaim(jobId, messageId);
+            return Decision.of(lostClaim(jobId, messageId));
         }
 
         Lease lease = acquired.get();
@@ -122,18 +132,19 @@ public class UploadEventHandler {
         try {
             String transcript = transcribe(record.bucketName(), objectKey, lease, leases);
             if (!jobs.complete(lease, transcript)) {
-                return EventOutcome.BUSY;
+                return Decision.of(EventOutcome.BUSY);
             }
             log.info("Job {} completed on attempt {}", jobId, lease.attempt());
-            return EventOutcome.PROCESSED;
+            return Decision.of(EventOutcome.PROCESSED);
         } catch (UnprocessableMediaException e) {
             log.warn("Job {} failed permanently: {}", jobId, e.getMessage());
             jobs.fail(lease, e.getMessage());
-            return EventOutcome.REJECTED;
+            return Decision.of(EventOutcome.REJECTED);
         } catch (RuntimeException e) {
             log.warn("Job {} failed on attempt {}; SQS will redeliver the event", jobId, lease.attempt(), e);
             jobs.fail(lease, e.toString());
-            return EventOutcome.FAILED;
+            Duration retryAfter = e instanceof RetryLaterException later ? later.retryAfter() : null;
+            return new Decision(EventOutcome.FAILED, retryAfter);
         }
     }
 
