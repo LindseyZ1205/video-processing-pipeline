@@ -215,6 +215,7 @@ class PipelineIntegrationTest {
                 () -> sqs.receiveMessage(r -> r.queueUrl(deadLetterQueueUrl).waitTimeSeconds(1).maxNumberOfMessages(10))
                         .messages(),
                 messages -> messages.stream().map(Message::body).anyMatch(body -> body.contains(upload.objectKey())));
+        Instant deadLettered = Instant.now();
 
         int maxReceiveCount = properties.queue().maxReceiveCount();
         UploadStatusResponse status = status(upload.uploadId());
@@ -227,6 +228,9 @@ class PipelineIntegrationTest {
         List<Instant> attempts = transcriber.callTimes(upload.objectKey());
         assertThat(Duration.between(attempts.get(1), attempts.get(2)))
                 .isGreaterThanOrEqualTo(properties.worker().visibilityTimeout().multipliedBy(2));
+        // The last attempt skips its backoff of four visibility timeouts, so SQS dead-letters the message at once.
+        assertThat(Duration.between(attempts.get(2), deadLettered))
+                .isLessThan(properties.worker().visibilityTimeout().multipliedBy(2));
     }
 
     @Test

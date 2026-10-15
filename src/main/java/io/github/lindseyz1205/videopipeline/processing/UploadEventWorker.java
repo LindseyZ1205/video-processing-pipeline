@@ -1,5 +1,7 @@
 package io.github.lindseyz1205.videopipeline.processing;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.lindseyz1205.videopipeline.config.PipelineProperties;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import java.time.Clock;
@@ -19,9 +21,11 @@ import org.springframework.context.SmartLifecycle;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.ChangeMessageVisibilityRequest;
 import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
+import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
 import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
+import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 
 /**
@@ -39,6 +43,7 @@ public class UploadEventWorker implements SmartLifecycle {
     private static final Duration MAX_VISIBILITY = Duration.ofHours(12);
     /** Up to this share of a retry delay is added at random. */
     private static final double RETRY_JITTER = 0.2;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final SqsClient sqs;
     private final UploadEventHandler handler;
@@ -50,6 +55,7 @@ public class UploadEventWorker implements SmartLifecycle {
 
     private volatile boolean running;
     private volatile String queueUrl;
+    private volatile int maxReceiveCount;
     private ExecutorService pollers;
     private ScheduledExecutorService heartbeats;
 
@@ -81,13 +87,40 @@ public class UploadEventWorker implements SmartLifecycle {
     @Override
     public void start() {
         queueUrl = sqs.getQueueUrl(GetQueueUrlRequest.builder().queueName(queueName).build()).queueUrl();
+        maxReceiveCount = readMaxReceiveCount();
         running = true;
         heartbeats = Executors.newScheduledThreadPool(settings.concurrency(), daemonThreads("upload-event-heartbeat-"));
         pollers = Executors.newFixedThreadPool(settings.concurrency(), daemonThreads("upload-event-poller-"));
         for (int i = 0; i < settings.concurrency(); i++) {
             pollers.execute(this::pollUntilStopped);
         }
-        log.info("Consuming {} with {} poller thread(s)", queueUrl, settings.concurrency());
+        log.info("Consuming {} with {} poller thread(s), max receive count {}", queueUrl, settings.concurrency(),
+                maxReceiveCount == 0 ? "none" : maxReceiveCount);
+    }
+
+    /**
+     * How many deliveries the queue allows before SQS moves a message to the dead-letter queue. It comes from the
+     * queue's own redrive policy rather than from configuration, so the two can't disagree; a changed policy is picked
+     * up on the next start. 0 when the queue has no policy or it can't be read; then every failed attempt backs off.
+     */
+    private int readMaxReceiveCount() {
+        GetQueueAttributesRequest request = GetQueueAttributesRequest.builder()
+                .queueUrl(queueUrl)
+                .attributeNames(QueueAttributeName.REDRIVE_POLICY)
+                .build();
+        try {
+            String policy = sqs.getQueueAttributes(request).attributes().get(QueueAttributeName.REDRIVE_POLICY);
+            return maxReceiveCount(policy);
+        } catch (JsonProcessingException | RuntimeException e) {
+            log.warn("Could not read the redrive policy of {}; every failed attempt backs off", queueUrl, e);
+            return 0;
+        }
+    }
+
+    /** The {@code maxReceiveCount} of a redrive policy, or 0 without one. */
+    static int maxReceiveCount(String redrivePolicy) throws JsonProcessingException {
+        // The count can be a JSON number or a string; asInt reads both.
+        return redrivePolicy == null ? 0 : JSON.readTree(redrivePolicy).path("maxReceiveCount").asInt(0);
     }
 
     private void pollUntilStopped() {
@@ -154,8 +187,8 @@ public class UploadEventWorker implements SmartLifecycle {
      * room to recover instead of three quick retries.
      */
     private void retryLater(Message message) {
-        Duration delay = retryDelay(receiveCount(message), settings.visibilityTimeout(), settings.maxRetryDelay(),
-                ThreadLocalRandom.current().nextDouble());
+        Duration delay = retryDelay(receiveCount(message), maxReceiveCount, settings.visibilityTimeout(),
+                settings.maxRetryDelay(), ThreadLocalRandom.current().nextDouble());
         try {
             sqs.changeMessageVisibility(ChangeMessageVisibilityRequest.builder()
                     .queueUrl(queueUrl)
@@ -182,9 +215,17 @@ public class UploadEventWorker implements SmartLifecycle {
      * second, four after the third, up to {@code maxDelay}. Up to 20% is added at random, so messages that failed
      * together, for example while the provider was rate limiting, don't all come back at the same moment.
      *
-     * @param random a number in {@code [0, 1)} that picks the jitter
+     * <p>After the last delivery the queue allows, there is no wait at all. The next receive moves the message to the
+     * dead-letter queue, and waiting first would only delay that, and the alert with it.
+     *
+     * @param maxReceiveCount deliveries before SQS dead-letters the message; 0 if it never does
+     * @param random          a number in {@code [0, 1)} that picks the jitter
      */
-    static Duration retryDelay(int receiveCount, Duration visibilityTimeout, Duration maxDelay, double random) {
+    static Duration retryDelay(int receiveCount, int maxReceiveCount, Duration visibilityTimeout, Duration maxDelay,
+            double random) {
+        if (maxReceiveCount > 0 && receiveCount >= maxReceiveCount) {
+            return Duration.ZERO;
+        }
         int doublings = Math.min(Math.max(receiveCount, 1) - 1, 20);
         double millis = visibilityTimeout.toMillis() * Math.pow(2, doublings) * (1 + RETRY_JITTER * random);
         // SQS takes whole seconds. Rounding never goes below the plain doubling, since jitter only adds.
