@@ -15,9 +15,11 @@ import io.github.lindseyz1205.videopipeline.job.Job;
 import io.github.lindseyz1205.videopipeline.job.JobStatus;
 import io.github.lindseyz1205.videopipeline.job.JobStore;
 import io.github.lindseyz1205.videopipeline.job.Lease;
+import io.github.lindseyz1205.videopipeline.transcription.RetryLaterException;
 import io.github.lindseyz1205.videopipeline.transcription.TranscriptionService;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Optional;
@@ -66,7 +68,7 @@ class UploadEventHandlerTest {
         when(transcription.transcribe(any())).thenReturn("hello");
         when(jobs.complete(LEASE, "hello")).thenReturn(true);
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.PROCESSED);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.PROCESSED);
         assertThat(events("processed")).isEqualTo(1);
         assertThat(transcriptions("success")).isEqualTo(1);
         assertThat(metrics.get("pipeline.events.lag").timer().totalTime(TimeUnit.SECONDS)).isEqualTo(5);
@@ -77,7 +79,7 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.empty());
         when(jobs.find(UPLOAD_ID)).thenReturn(Optional.of(job(JobStatus.COMPLETED, null)));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.DUPLICATE);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.DUPLICATE);
         verifyNoInteractions(transcription);
         assertThat(events("duplicate")).isEqualTo(1);
         assertThat(metrics.get("pipeline.events.lag").timer().count()).isZero();
@@ -88,7 +90,7 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.empty());
         when(jobs.find(UPLOAD_ID)).thenReturn(Optional.of(job(JobStatus.PROCESSING, "message-2")));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.DUPLICATE);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.DUPLICATE);
         verifyNoInteractions(transcription);
         assertThat(events("duplicate")).isEqualTo(1);
         assertThat(events("busy")).isZero();
@@ -99,7 +101,7 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.empty());
         when(jobs.find(UPLOAD_ID)).thenReturn(Optional.of(job(JobStatus.PROCESSING, MESSAGE_ID)));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.BUSY);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.BUSY);
         verifyNoInteractions(transcription);
         assertThat(events("busy")).isEqualTo(1);
     }
@@ -109,7 +111,7 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.empty());
         when(jobs.find(UPLOAD_ID)).thenReturn(Optional.of(job(JobStatus.PROCESSING, null)));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.BUSY);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.BUSY);
         assertThat(events("busy")).isEqualTo(1);
     }
 
@@ -119,7 +121,7 @@ class UploadEventHandlerTest {
         when(transcription.transcribe(any())).thenReturn("hello");
         when(jobs.complete(LEASE, "hello")).thenReturn(false);
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.BUSY);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.BUSY);
         assertThat(events("busy")).isEqualTo(1);
     }
 
@@ -128,10 +130,22 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.of(LEASE));
         when(transcription.transcribe(any())).thenThrow(new IllegalStateException("provider timed out"));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.FAILED);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.FAILED);
         verify(jobs).fail(eq(LEASE), contains("provider timed out"));
         assertThat(events("failed")).isEqualTo(1);
         assertThat(transcriptions("failure")).isEqualTo(1);
+    }
+
+    @Test
+    void passesOnHowLongTheProviderAskedToWait() {
+        when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.of(LEASE));
+        when(transcription.transcribe(any()))
+                .thenThrow(new RetryLaterException("rate limited", Duration.ofSeconds(30), null));
+
+        assertThat(handler.handle(MESSAGE_ID, EVENT))
+                .isEqualTo(new Decision(EventOutcome.FAILED, Duration.ofSeconds(30)));
+        verify(jobs).fail(eq(LEASE), contains("rate limited"));
+        assertThat(events("failed")).isEqualTo(1);
     }
 
     @Test
@@ -140,7 +154,7 @@ class UploadEventHandlerTest {
                 .thenReturn(HeadObjectResponse.builder().contentLength(DataSize.ofMegabytes(200).toBytes()).build());
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.of(LEASE));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT)).isEqualTo(EventOutcome.REJECTED);
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.REJECTED);
         verify(jobs).fail(eq(LEASE), contains("limit"));
         verifyNoInteractions(transcription);
         assertThat(events("rejected")).isEqualTo(1);
@@ -168,14 +182,14 @@ class UploadEventHandlerTest {
 
     @Test
     void deletesTheS3TestEvent() {
-        assertThat(handler.handle(MESSAGE_ID, "{\"Service\":\"Amazon S3\",\"Event\":\"s3:TestEvent\"}"))
+        assertThat(handler.handle(MESSAGE_ID, "{\"Service\":\"Amazon S3\",\"Event\":\"s3:TestEvent\"}").outcome())
                 .isEqualTo(EventOutcome.IGNORED);
         verifyNoInteractions(jobs);
     }
 
     @Test
     void deletesEventsForObjectsThatAreNotUploads() {
-        assertThat(handler.handle(MESSAGE_ID, EVENT.replace(KEY, "transcripts/summary.txt")))
+        assertThat(handler.handle(MESSAGE_ID, EVENT.replace(KEY, "transcripts/summary.txt")).outcome())
                 .isEqualTo(EventOutcome.IGNORED);
         verifyNoInteractions(jobs);
         assertThat(events("ignored")).isEqualTo(1);
@@ -188,7 +202,7 @@ class UploadEventHandlerTest {
         when(transcription.transcribe(any())).thenReturn("hello");
         when(jobs.complete(LEASE, "hello")).thenReturn(true);
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT, leases)).isEqualTo(EventOutcome.PROCESSED);
+        assertThat(handler.handle(MESSAGE_ID, EVENT, leases).outcome()).isEqualTo(EventOutcome.PROCESSED);
 
         InOrder order = inOrder(leases, transcription, jobs);
         order.verify(leases).keepAlive(LEASE);
@@ -203,7 +217,7 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.of(LEASE));
         when(transcription.transcribe(any())).thenThrow(new IllegalStateException("provider timed out"));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT, leases)).isEqualTo(EventOutcome.FAILED);
+        assertThat(handler.handle(MESSAGE_ID, EVENT, leases).outcome()).isEqualTo(EventOutcome.FAILED);
 
         InOrder order = inOrder(leases, jobs);
         order.verify(leases).keepAlive(LEASE);
@@ -217,7 +231,7 @@ class UploadEventHandlerTest {
         when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.empty());
         when(jobs.find(UPLOAD_ID)).thenReturn(Optional.of(job(JobStatus.PROCESSING, MESSAGE_ID)));
 
-        assertThat(handler.handle(MESSAGE_ID, EVENT, leases)).isEqualTo(EventOutcome.BUSY);
+        assertThat(handler.handle(MESSAGE_ID, EVENT, leases).outcome()).isEqualTo(EventOutcome.BUSY);
 
         verifyNoInteractions(leases);
     }

@@ -161,22 +161,22 @@ public class UploadEventWorker implements SmartLifecycle {
         Heartbeat heartbeat = new Heartbeat(sqs, jobs, metrics, heartbeats, clock, settings, queueUrl,
                 message.receiptHandle());
         try (MDC.MDCCloseable ignored = MDC.putCloseable("messageId", message.messageId())) {
-            EventOutcome outcome = handler.handle(message.messageId(), message.body(), heartbeat);
+            Decision decision = handler.handle(message.messageId(), message.body(), heartbeat);
             heartbeat.close(); // the message's fate is decided; it must not be extended after this
-            if (outcome.deletesMessage()) {
+            if (decision.outcome().deletesMessage()) {
                 sqs.deleteMessage(DeleteMessageRequest.builder()
                         .queueUrl(queueUrl)
                         .receiptHandle(message.receiptHandle())
                         .build());
-            } else if (outcome == EventOutcome.FAILED) {
-                retryLater(message);
+            } else if (decision.outcome() == EventOutcome.FAILED) {
+                retryLater(message, decision.retryAfter());
             }
         } catch (RuntimeException e) {
             // Not deleting is the safe default. SQS redelivers the message, and after maxReceiveCount deliveries it
             // moves to the dead-letter queue.
             log.warn("Message {} was not processed and will be redelivered", message.messageId(), e);
             heartbeat.close();
-            retryLater(message);
+            retryLater(message, null);
         } finally {
             heartbeat.close();
         }
@@ -185,9 +185,11 @@ public class UploadEventWorker implements SmartLifecycle {
     /**
      * Hides a message whose attempt failed for longer after each delivery, so a struggling provider or job store gets
      * room to recover instead of three quick retries.
+     *
+     * @param retryAfter how long the provider asked to wait, or {@code null}
      */
-    private void retryLater(Message message) {
-        Duration delay = retryDelay(receiveCount(message), maxReceiveCount, settings.visibilityTimeout(),
+    private void retryLater(Message message, Duration retryAfter) {
+        Duration delay = retryDelay(receiveCount(message), maxReceiveCount, retryAfter, settings.visibilityTimeout(),
                 settings.maxRetryDelay(), ThreadLocalRandom.current().nextDouble());
         try {
             sqs.changeMessageVisibility(ChangeMessageVisibilityRequest.builder()
@@ -212,23 +214,32 @@ public class UploadEventWorker implements SmartLifecycle {
 
     /**
      * How long a message waits after a failed attempt: one visibility timeout after its first delivery, two after the
-     * second, four after the third, up to {@code maxDelay}. Up to 20% is added at random, so messages that failed
+     * second, four after the third, up to {@code maxDelay}. If the provider asked for a longer wait, the message
+     * waits that long instead. A shorter one doesn't shorten the backoff, so a provider that keeps asking for one more
+     * second can't use up every attempt within seconds. Up to 20% is added at random, so messages that failed
      * together, for example while the provider was rate limiting, don't all come back at the same moment.
      *
      * <p>After the last delivery the queue allows, there is no wait at all. The next receive moves the message to the
      * dead-letter queue, and waiting first would only delay that, and the alert with it.
      *
      * @param maxReceiveCount deliveries before SQS dead-letters the message; 0 if it never does
+     * @param retryAfter      how long the provider asked to wait, or {@code null}
      * @param random          a number in {@code [0, 1)} that picks the jitter
      */
-    static Duration retryDelay(int receiveCount, int maxReceiveCount, Duration visibilityTimeout, Duration maxDelay,
-            double random) {
+    static Duration retryDelay(int receiveCount, int maxReceiveCount, Duration retryAfter, Duration visibilityTimeout,
+            Duration maxDelay, double random) {
         if (maxReceiveCount > 0 && receiveCount >= maxReceiveCount) {
             return Duration.ZERO;
         }
         int doublings = Math.min(Math.max(receiveCount, 1) - 1, 20);
-        double millis = visibilityTimeout.toMillis() * Math.pow(2, doublings) * (1 + RETRY_JITTER * random);
-        // SQS takes whole seconds. Rounding never goes below the plain doubling, since jitter only adds.
+        double millis = visibilityTimeout.toMillis() * Math.pow(2, doublings);
+        if (retryAfter != null) {
+            // At most maxDelay, rounded up to whole seconds, so below the cap it never comes before the provider asked.
+            Duration asked = retryAfter.compareTo(maxDelay) > 0 ? maxDelay : retryAfter;
+            millis = Math.max(millis, Math.ceil(asked.toMillis() / 1000.0) * 1000);
+        }
+        millis *= 1 + RETRY_JITTER * random;
+        // SQS takes whole seconds. The base is whole seconds and jitter only adds, so rounding never goes below it.
         long seconds = Math.round(millis / 1000);
         return Duration.ofSeconds(Math.min(seconds, maxDelay.toSeconds()));
     }

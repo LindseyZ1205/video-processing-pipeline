@@ -10,6 +10,7 @@ public interface TranscriptionService {
 
     /**
      * @throws UnprocessableMediaException if this file can never be transcribed, so retrying would not help
+     * @throws RetryLaterException         if the provider said how long to wait before trying again
      */
     String transcribe(StoredObject object);
 }

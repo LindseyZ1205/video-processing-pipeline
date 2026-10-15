@@ -129,6 +129,11 @@ tolerate it.
   third, up to `max-retry-delay` (15 min). Up to 20% is added at random, so messages that failed together, say while
   the provider was rate limiting, don't all come back at once. A busy job keeps the plain visibility timeout, so a
   crashed worker's job is still picked up within a minute.
+- A provider that is rate limiting or briefly down can say how long to wait. When OpenAI answers 429 or 503 with a
+  `Retry-After` header, in seconds or as an HTTP date, the attempt fails as usual, but the message waits at least that
+  long: the longer of the backoff and the provider's wait, plus the jitter, up to `max-retry-delay`. A shorter
+  `Retry-After` doesn't shorten the backoff. With three attempts, a provider that kept asking for one more second
+  would otherwise use them all up within seconds.
 - The last delivery doesn't back off. The worker reads `maxReceiveCount` from the queue's redrive policy when it
   starts. When that delivery fails, it makes the message visible again right away, and the next receive moves it to
   the dead-letter queue. Waiting out the backoff first would only hold back the move and its alert, four minutes with
@@ -364,6 +369,7 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
     upload;
   - a duplicate that arrives while the job is still running is dropped right away;
   - a failed attempt is retried and then succeeds;
+  - a rate-limited attempt is retried no sooner than the provider's `Retry-After` asked;
   - an event that keeps failing lands in the dead-letter queue after 3 attempts, its retries back off, and the last
     one goes to the dead-letter queue without waiting;
   - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
@@ -372,17 +378,19 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - the Prometheus endpoint reports the pipeline's metrics.
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate of a completed
   job, duplicate of a job still running, redelivery of the message that holds the lease, lease lost, transient
-  failure, permanent failure, unreachable job store, unreadable message, S3 test event. It also checks the metric
-  that each case records, and that a lease is kept alive only while the file is being transcribed.
+  failure (with and without a wait the provider asked for), permanent failure, unreachable job store, unreadable
+  message, S3 test event. It also checks the metric that each case records, and that a lease is kept alive only while
+  the file is being transcribed.
 - `UploadEventWorkerTest` checks both backoffs: the wait after a failed attempt (doubling per delivery, the cap,
-  the jitter, none after the last delivery the redrive policy allows) and the pause in polling after SQS errors.
+  the jitter, a longer wait the provider asked for, none after the last delivery the redrive policy allows) and the
+  pause in polling after SQS errors.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
   work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
   each extension records, including when DynamoDB can't be reached.
 - `QueueDepthGaugesTest` checks the queue depth gauges, including that they keep their last value while SQS is
   unreachable.
-- `OpenAiTranscriptionServiceTest` checks the multipart request and how errors are classified, against a mock server,
-  and that a request that never gets an answer times out.
+- `OpenAiTranscriptionServiceTest` checks the multipart request, how errors are classified and how `Retry-After` is
+  read (seconds or a date), against a mock server, and that a request that never gets an answer times out.
 - `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys) and key sanitizing.
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
@@ -472,7 +480,7 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.worker.concurrency` | `2` | Poller threads |
 | `pipeline.worker.visibility-timeout` | `60s` | Retry delay, and how long a crashed worker's job stays claimed |
 | `pipeline.worker.heartbeat-interval` | `20s` | How often running work extends its message and lease; shorter than the visibility timeout |
-| `pipeline.worker.max-retry-delay` | `15m` | Cap on the wait after a failed attempt, which starts at one visibility timeout and doubles per delivery |
+| `pipeline.worker.max-retry-delay` | `15m` | Cap on the wait after a failed attempt, which starts at one visibility timeout and doubles per delivery, including a longer wait the provider asks for |
 | `pipeline.worker.max-processing-time` | `15m` | When the heartbeat gives up on an attempt, so a hung one gets taken over; longer than the visibility timeout |
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |
