@@ -7,12 +7,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The worker's two backoffs: how long a message waits after a failed attempt, and how long polling pauses after SQS
- * errors.
+ * errors. The first depends on the queue's redrive policy, since the last delivery it allows doesn't wait at all.
  */
 class UploadEventWorkerTest {
 
     private static final Duration VISIBILITY_TIMEOUT = Duration.ofSeconds(60);
     private static final Duration MAX_RETRY_DELAY = Duration.ofMinutes(15);
+    /** A queue without a redrive policy, so no delivery is the last one. */
+    private static final int NO_LIMIT = 0;
 
     @Test
     void aFailedAttemptWaitsOneVisibilityTimeoutAfterItsFirstDelivery() {
@@ -34,10 +36,29 @@ class UploadEventWorkerTest {
 
     @Test
     void jitterAddsUpToAFifth() {
-        assertThat(UploadEventWorker.retryDelay(2, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0.5))
+        assertThat(UploadEventWorker.retryDelay(2, NO_LIMIT, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0.5))
                 .isEqualTo(Duration.ofSeconds(132));
-        assertThat(UploadEventWorker.retryDelay(2, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0.9999))
+        assertThat(UploadEventWorker.retryDelay(2, NO_LIMIT, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0.9999))
                 .isEqualTo(Duration.ofSeconds(144));
+    }
+
+    @Test
+    void theLastDeliveryGoesStraightToTheDeadLetterQueue() {
+        assertThat(UploadEventWorker.retryDelay(2, 3, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0))
+                .isEqualTo(Duration.ofSeconds(120));
+        assertThat(UploadEventWorker.retryDelay(3, 3, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0)).isZero();
+        assertThat(UploadEventWorker.retryDelay(4, 3, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0)).isZero();
+    }
+
+    @Test
+    void theMaxReceiveCountComesFromTheRedrivePolicy() throws Exception {
+        String deadLetterQueue = "arn:aws:sqs:us-east-1:000000000000:video-upload-events-dlq";
+        assertThat(UploadEventWorker.maxReceiveCount(
+                "{\"deadLetterTargetArn\":\"%s\",\"maxReceiveCount\":3}".formatted(deadLetterQueue))).isEqualTo(3);
+        assertThat(UploadEventWorker.maxReceiveCount(
+                "{\"deadLetterTargetArn\":\"%s\",\"maxReceiveCount\":\"5\"}".formatted(deadLetterQueue))).isEqualTo(5);
+        assertThat(UploadEventWorker.maxReceiveCount("{}")).isZero();
+        assertThat(UploadEventWorker.maxReceiveCount(null)).isZero();
     }
 
     @Test
@@ -55,6 +76,6 @@ class UploadEventWorkerTest {
     }
 
     private static Duration retryDelay(int receiveCount) {
-        return UploadEventWorker.retryDelay(receiveCount, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0);
+        return UploadEventWorker.retryDelay(receiveCount, NO_LIMIT, VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0);
     }
 }

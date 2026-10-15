@@ -12,7 +12,11 @@ data "aws_iam_policy_document" "service" {
   statement {
     sid = "ConsumeUploadEvents"
     # ChangeMessageVisibility: the heartbeat keeps a message hidden while its transcription is still running.
-    actions   = ["sqs:GetQueueUrl", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
+    # GetQueueAttributes: the worker reads the redrive policy, so a failed last delivery doesn't wait out a backoff.
+    actions = [
+      "sqs:GetQueueUrl", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility",
+      "sqs:GetQueueAttributes",
+    ]
     resources = [aws_sqs_queue.events.arn]
   }
 

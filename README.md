@@ -129,6 +129,10 @@ tolerate it.
   third, up to `max-retry-delay` (15 min). Up to 20% is added at random, so messages that failed together, say while
   the provider was rate limiting, don't all come back at once. A busy job keeps the plain visibility timeout, so a
   crashed worker's job is still picked up within a minute.
+- The last delivery doesn't back off. The worker reads `maxReceiveCount` from the queue's redrive policy when it
+  starts. When that delivery fails, it makes the message visible again right away, and the next receive moves it to
+  the dead-letter queue. Waiting out the backoff first would only hold back the move and its alert, four minutes with
+  the defaults. A queue without a redrive policy backs off on every delivery.
 - The worker sets the visibility timeout on every `ReceiveMessage` and uses the same value as the job lease. When a
   crashed worker's message reappears, its lease has already expired, so the next delivery can take over.
 - Long work keeps its claim with a heartbeat, up to a limit. See
@@ -360,7 +364,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
     upload;
   - a duplicate that arrives while the job is still running is dropped right away;
   - a failed attempt is retried and then succeeds;
-  - an event that keeps failing lands in the dead-letter queue after 3 attempts, and its retries back off;
+  - an event that keeps failing lands in the dead-letter queue after 3 attempts, its retries back off, and the last
+    one goes to the dead-letter queue without waiting;
   - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
     and the lease extensions show up in the metrics with none lost;
   - a transcription that hangs is given up on after `max-processing-time`, and the next delivery completes the job;
@@ -370,7 +375,7 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   failure, permanent failure, unreachable job store, unreadable message, S3 test event. It also checks the metric
   that each case records, and that a lease is kept alive only while the file is being transcribed.
 - `UploadEventWorkerTest` checks both backoffs: the wait after a failed attempt (doubling per delivery, the cap,
-  the jitter) and the pause in polling after SQS errors.
+  the jitter, none after the last delivery the redrive policy allows) and the pause in polling after SQS errors.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
   work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
   each extension records, including when DynamoDB can't be reached.
