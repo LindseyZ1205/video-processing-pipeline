@@ -24,6 +24,13 @@ class UploadKeyTest {
     }
 
     @Test
+    void onlyUuidsAreUploadIds() {
+        assertThat(UploadKey.isUploadId("0f8fad5b-d9cb-469f-a165-70867728950e")).isTrue();
+        assertThat(UploadKey.isUploadId("not-a-uuid")).isFalse();
+        assertThat(UploadKey.isUploadId("../0f8fad5b-d9cb-469f-a165-70867728950e")).isFalse();
+    }
+
+    @Test
     void keysOutsideTheUploadLayoutAreNotUploads() {
         assertThat(UploadKey.parse("transcripts/summary.txt")).isEmpty();
         assertThat(UploadKey.parse("uploads/user-1/not-a-uuid/talk.mp4")).isEmpty();

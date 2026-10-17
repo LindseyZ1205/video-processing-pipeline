@@ -22,6 +22,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
@@ -72,6 +73,13 @@ class UploadEventHandlerTest {
         assertThat(events("processed")).isEqualTo(1);
         assertThat(transcriptions("success")).isEqualTo(1);
         assertThat(metrics.get("pipeline.events.lag").timer().totalTime(TimeUnit.SECONDS)).isEqualTo(5);
+    }
+
+    @Test
+    void onlyOutcomesThatLeaveNothingToDoLetTheMessageBeDeleted() {
+        assertThat(Arrays.stream(EventOutcome.values()).filter(EventOutcome::deletesMessage))
+                .containsExactlyInAnyOrder(EventOutcome.PROCESSED, EventOutcome.DUPLICATE, EventOutcome.IGNORED,
+                        EventOutcome.REJECTED);
     }
 
     @Test
@@ -158,6 +166,17 @@ class UploadEventHandlerTest {
         verify(jobs).fail(eq(LEASE), contains("limit"));
         verifyNoInteractions(transcription);
         assertThat(events("rejected")).isEqualTo(1);
+    }
+
+    @Test
+    void transcribesAFileRightAtTheSizeLimit() {
+        when(s3.headObject(any(HeadObjectRequest.class)))
+                .thenReturn(HeadObjectResponse.builder().contentLength(DataSize.ofMegabytes(100).toBytes()).build());
+        when(jobs.tryAcquire(UPLOAD_ID, BUCKET, KEY, MESSAGE_ID)).thenReturn(Optional.of(LEASE));
+        when(transcription.transcribe(any())).thenReturn("hello");
+        when(jobs.complete(LEASE, "hello")).thenReturn(true);
+
+        assertThat(handler.handle(MESSAGE_ID, EVENT).outcome()).isEqualTo(EventOutcome.PROCESSED);
     }
 
     @Test

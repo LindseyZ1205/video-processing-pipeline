@@ -28,6 +28,13 @@ class AwsConfigurationTest {
         assertThat(url).startsWith("http://localstack:4566/video-uploads/uploads/");
     }
 
+    @Test
+    void presignedUrlsPointAtAwsWithoutAnEndpointOverride() {
+        String url = presignedUploadUrl(new PipelineProperties.Aws("us-east-1", null, null, "test", "test", false));
+
+        assertThat(url).startsWith("https://video-uploads.s3.").contains(".amazonaws.com/uploads/");
+    }
+
     private static String presignedUploadUrl(PipelineProperties.Aws aws) {
         PipelineProperties properties = new PipelineProperties(aws, null, null, null, null, null, null, null);
         AwsConfiguration configuration = new AwsConfiguration(properties);
