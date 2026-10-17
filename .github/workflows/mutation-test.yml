@@ -1,0 +1,82 @@
+name: Mutation test
+
+# A measurement, not a gate. PIT makes one small change to the compiled code at a time (flips a condition, drops a
+# call, returns null instead of a value...) and reruns the unit tests against it. A change that no test notices
+# survives, and points at behavior nothing checks. Run it by hand (Actions > Mutation test > Run workflow, or
+# `gh workflow run mutation-test.yml`). The scores and the surviving mutants land in the run summary, and the full HTML
+# report is uploaded as an artifact.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pitest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Run PIT against the unit tests
+        run: ./gradlew pitest --no-daemon
+
+      - name: Summarize
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import collections
+          import xml.etree.ElementTree as ET
+
+          counts = collections.defaultdict(collections.Counter)
+          survivors = []
+          for mutation in ET.parse("build/reports/pitest/mutations.xml").getroot().iter("mutation"):
+              status = mutation.get("status")
+              if status == "NON_VIABLE":
+                  continue
+              mutated_class = mutation.findtext("mutatedClass")
+              package = mutated_class.rsplit(".", 2)[-2]
+              if mutation.get("detected") == "true":
+                  outcome = "killed"
+              elif status == "NO_COVERAGE":
+                  outcome = "no coverage"
+              else:
+                  outcome = "survived"
+                  survivors.append((mutated_class.rsplit(".", 1)[-1], mutation.findtext("mutatedMethod"),
+                                    int(mutation.findtext("lineNumber")), mutation.findtext("description")))
+              for key in (package, "all"):
+                  counts[key][outcome] += 1
+                  counts[key]["mutants"] += 1
+
+          def row(name, c):
+              covered = c["mutants"] - c["no coverage"]
+              score = 100 * c["killed"] / c["mutants"]
+              strength = 100 * c["killed"] / covered if covered else 0
+              return (f"| {name} | {c['mutants']} | {c['killed']} | {c['survived']} | {c['no coverage']} "
+                      f"| {score:.0f}% | {strength:.0f}% |")
+
+          print("### Mutation testing (unit tests only)\n")
+          print("Mutation score: killed / all mutants. Test strength: killed / mutants that some unit test runs.\n")
+          print("| Package | Mutants | Killed | Survived | No coverage | Score | Test strength |")
+          print("|---|---|---|---|---|---|---|")
+          for package in sorted(p for p in counts if p != "all"):
+              print(row(f"`{package}`", counts[package]))
+          print(row("**all**", counts["all"]))
+          print(f"\n#### Surviving mutants ({len(survivors)})\n")
+          print("| Class | Method | Line | Mutation |")
+          print("|---|---|---|---|")
+          for cls, method, line, description in sorted(survivors):
+              print(f"| `{cls}` | `{method}` | {line} | {description} |")
+          PY
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pitest-report
+          path: build/reports/pitest/
