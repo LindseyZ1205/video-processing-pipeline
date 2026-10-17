@@ -38,7 +38,7 @@ class HeartbeatTest {
     // Messages and leases last 60 s, beats come every 20 s, and the heartbeat gives up after 15 minutes.
     private static final PipelineProperties.Worker SETTINGS = new PipelineProperties.Worker(true, 1, 1,
             Duration.ofSeconds(10), Duration.ofSeconds(60), Duration.ofSeconds(20), Duration.ofMinutes(15),
-            Duration.ofMinutes(15));
+            Duration.ofMinutes(15), 5);
 
     private final SqsClient sqs = mock(SqsClient.class);
     private final JobStore jobs = mock(JobStore.class);

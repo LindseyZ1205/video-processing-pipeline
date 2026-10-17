@@ -134,6 +134,12 @@ tolerate it.
   long: the longer of the backoff and the provider's wait, plus the jitter, up to `max-retry-delay`. A shorter
   `Retry-After` doesn't shorten the backoff. With three attempts, a provider that kept asking for one more second
   would otherwise use them all up within seconds.
+- A rate limit doesn't use up a delivery. When the provider said how long to wait, the worker sends the event to the
+  queue again with that delay (SQS allows up to 15 minutes) and deletes the delivery it got, so the copy starts with
+  a fresh receive count. Each copy carries a `throttled-requeues` attribute. After `max-throttled-requeues` (5) of
+  them, throttling counts like any failed attempt, so an event that is never let through still reaches the
+  dead-letter queue. A 429 without `Retry-After` counts as a failed attempt from the start: OpenAI also answers 429
+  when the account has run out of quota, and waiting won't fix that.
 - The last delivery doesn't back off. The worker reads `maxReceiveCount` from the queue's redrive policy when it
   starts. When that delivery fails, it makes the message visible again right away, and the next receive moves it to
   the dead-letter queue. Waiting out the backoff first would only hold back the move and its alert, four minutes with
@@ -329,6 +335,7 @@ Metrics are exported for Prometheus at `/actuator/prometheus`:
 | `pipeline_events_lag_seconds` | histogram | From the upload finishing to a worker starting on it: queueing plus retry delays |
 | `pipeline_queue_messages{queue,state}` | gauge | Visible and in-flight messages on the event queue and the dead-letter queue, refreshed every 30 s |
 | `pipeline_sqs_receive_errors_total` | counter | Failed polls of SQS |
+| `pipeline_events_requeued_total` | counter | Throttled events sent again with the provider's delay, instead of using up a delivery |
 | `pipeline_lease_extensions_total{outcome}` | counter | Heartbeat attempts to extend a job's lease: `extended`, `lost` (another worker had taken the job over), `failed` (the DynamoDB call errored) or `abandoned` (the work ran past `max-processing-time`) |
 
 [`monitoring/alerts.yml`](monitoring/alerts.yml) turns these metrics into Prometheus alert rules:
@@ -370,6 +377,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   - a duplicate that arrives while the job is still running is dropped right away;
   - a failed attempt is retried and then succeeds;
   - a rate-limited attempt is retried no sooner than the provider's `Retry-After` asked;
+  - rate limits don't use up the retries: an event throttled as often as SQS delivers a message still completes, and
+    one that is never let through still ends up in the dead-letter queue;
   - an event that keeps failing lands in the dead-letter queue after 3 attempts, its retries back off, and the last
     one goes to the dead-letter queue without waiting;
   - a transcription that runs longer than two visibility timeouts is still processed exactly once (the heartbeat),
@@ -383,7 +392,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   the file is being transcribed.
 - `UploadEventWorkerTest` checks both backoffs: the wait after a failed attempt (doubling per delivery, the cap,
   the jitter, a longer wait the provider asked for, none after the last delivery the redrive policy allows) and the
-  pause in polling after SQS errors.
+  pause in polling after SQS errors. It also checks the delay of a throttled event sent again, and how the copy
+  counts its requeues.
 - `HeartbeatTest` checks that each beat extends both the message and the lease, and that beating stops when the
   work ends, when the lease is lost, and once the work runs past `max-processing-time`. It also checks the outcome
   each extension records, including when DynamoDB can't be reached.
@@ -481,6 +491,7 @@ All settings live under `pipeline.*` in [`application.yml`](src/main/resources/a
 | `pipeline.worker.visibility-timeout` | `60s` | Retry delay, and how long a crashed worker's job stays claimed |
 | `pipeline.worker.heartbeat-interval` | `20s` | How often running work extends its message and lease; shorter than the visibility timeout |
 | `pipeline.worker.max-retry-delay` | `15m` | Cap on the wait after a failed attempt, which starts at one visibility timeout and doubles per delivery, including a longer wait the provider asks for |
+| `pipeline.worker.max-throttled-requeues` | `5` | How many times a throttled event (the provider said how long to wait) is sent again instead of using up a delivery; after that, throttling counts as a failed attempt |
 | `pipeline.worker.max-processing-time` | `15m` | When the heartbeat gives up on an attempt, so a hung one gets taken over; longer than the visibility timeout |
 | `pipeline.jobs.retention` | `7d` | Job records expire through DynamoDB TTL on `expiresAt` |
 | `pipeline.transcription.provider` | `fake` | `fake` or `openai` |

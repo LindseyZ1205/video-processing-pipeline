@@ -55,9 +55,13 @@ public record PipelineProperties(
      * @param maxRetryDelay     the longest a message waits after a failed attempt, even when the transcription
      *                          provider asks for longer. The wait starts at one visibility timeout and doubles with
      *                          each delivery. Between the visibility timeout and 12 hours.
+     * @param maxThrottledRequeues how many times an event the provider throttled, saying how long to wait, is sent
+     *                          again with that delay instead of using up one of its deliveries. After that, throttling
+     *                          counts as a failed attempt, so an event that is never let through still reaches the
+     *                          dead-letter queue. 0 turns this off.
      */
     public record Worker(boolean enabled, int concurrency, int maxMessages, Duration waitTime, Duration visibilityTimeout,
-            Duration heartbeatInterval, Duration maxProcessingTime, Duration maxRetryDelay) {
+            Duration heartbeatInterval, Duration maxProcessingTime, Duration maxRetryDelay, int maxThrottledRequeues) {
     }
 
     public record Transcription(String provider, OpenAi openai) {

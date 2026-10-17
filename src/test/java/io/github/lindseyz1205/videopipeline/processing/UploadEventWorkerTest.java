@@ -3,7 +3,10 @@ package io.github.lindseyz1205.videopipeline.processing;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 
 /**
  * The worker's two backoffs: how long a message waits after a failed attempt, and how long polling pauses after SQS
@@ -66,6 +69,25 @@ class UploadEventWorkerTest {
     }
 
     @Test
+    void aThrottledEventIsSentAgainAfterTheWaitItsDeliveryWouldGetEvenTheLastOne() {
+        assertThat(UploadEventWorker.requeueDelay(1, Duration.ofSeconds(30), VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0))
+                .isEqualTo(Duration.ofSeconds(60));
+        assertThat(UploadEventWorker.requeueDelay(3, Duration.ofSeconds(30), VISIBILITY_TIMEOUT, MAX_RETRY_DELAY, 0))
+                .isEqualTo(Duration.ofSeconds(240));
+        // SQS delays a message it is sent by at most 15 minutes, whatever max-retry-delay allows.
+        assertThat(UploadEventWorker.requeueDelay(1, Duration.ofHours(2), VISIBILITY_TIMEOUT, Duration.ofHours(1), 0))
+                .isEqualTo(Duration.ofMinutes(15));
+    }
+
+    @Test
+    void anEventCarriesHowOftenItWasSentAgain() {
+        assertThat(UploadEventWorker.throttledRequeues(Message.builder().build())).isZero();
+        assertThat(UploadEventWorker.throttledRequeues(requeued("2"))).isEqualTo(2);
+        // An unreadable count stops the requeues rather than risk sending the event around forever.
+        assertThat(UploadEventWorker.throttledRequeues(requeued("two"))).isEqualTo(Integer.MAX_VALUE);
+    }
+
+    @Test
     void theMaxReceiveCountComesFromTheRedrivePolicy() throws Exception {
         String deadLetterQueue = "arn:aws:sqs:us-east-1:000000000000:video-upload-events-dlq";
         assertThat(UploadEventWorker.maxReceiveCount(
@@ -88,6 +110,13 @@ class UploadEventWorkerTest {
         assertThat(UploadEventWorker.backoff(5)).isEqualTo(Duration.ofSeconds(16));
         assertThat(UploadEventWorker.backoff(6)).isEqualTo(Duration.ofSeconds(30));
         assertThat(UploadEventWorker.backoff(50)).isEqualTo(Duration.ofSeconds(30));
+    }
+
+    private static Message requeued(String count) {
+        return Message.builder()
+                .messageAttributes(Map.of(UploadEventWorker.THROTTLED_REQUEUES,
+                        MessageAttributeValue.builder().dataType("Number").stringValue(count).build()))
+                .build();
     }
 
     private static Duration retryDelay(int receiveCount) {
