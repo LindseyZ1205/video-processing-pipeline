@@ -32,6 +32,7 @@ public class PipelineMetrics {
     private final Timer transcriptionFailed;
     private final Timer lag;
     private final Counter receiveErrors;
+    private final Counter requeued;
     private final Counter leasesExtended;
     private final Counter leasesLost;
     private final Counter leaseExtensionsFailed;
@@ -54,6 +55,9 @@ public class PipelineMetrics {
                 .register(registry);
         this.receiveErrors = Counter.builder("pipeline.sqs.receive.errors")
                 .description("Failed SQS receive calls")
+                .register(registry);
+        this.requeued = Counter.builder("pipeline.events.requeued")
+                .description("Throttled events sent again with the provider's delay, so the wait used up no delivery")
                 .register(registry);
         this.leasesExtended = leaseExtensionCounter("extended");
         this.leasesLost = leaseExtensionCounter("lost");
@@ -90,6 +94,10 @@ public class PipelineMetrics {
 
     void recordReceiveError() {
         receiveErrors.increment();
+    }
+
+    void recordRequeued() {
+        requeued.increment();
     }
 
     void recordLeaseExtended() {

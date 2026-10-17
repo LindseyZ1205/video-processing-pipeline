@@ -24,7 +24,9 @@ won't be processed until someone redrives them. The dead-letter queue Terraform 
 2. **Read why they failed.** `GET /api/uploads/{uploadId}` returns the job's `attempts` and its last `error`.
    - `401` or `403` from the provider: the API key is missing or was revoked. Fix the configuration.
    - `429`, `5xx` or timeouts: the provider was degraded for longer than the retries' backoff covered. A
-     `RetryLaterException` also says how long the provider asked to wait.
+     `RetryLaterException` also says how long the provider asked to wait. Such an event only gets here after
+     `max-throttled-requeues` re-sends, so the provider has been rate limiting for a while: check its quota, or lower
+     `pipeline.worker.concurrency`.
    - No job, or no error on it: the handler threw before recording anything. DynamoDB was unreachable, or the message
      isn't a readable S3 event. These count as `outcome="error"` in `pipeline_events_total`, and the worker log has
      the exception next to `was not processed`.

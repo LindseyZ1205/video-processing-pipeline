@@ -40,6 +40,9 @@ pipeline:
     max-processing-time: 15m
     # After a failed attempt the message waits one visibility timeout, then twice that, and so on, up to this.
     max-retry-delay: 15m
+    # When the provider throttles an attempt and says how long to wait, the event is sent again with that delay
+    # instead of using up a delivery, at most this many times. After that, throttling counts as a failed attempt.
+    max-throttled-requeues: 5
   transcription:
     provider: fake # fake | openai
     openai:

@@ -64,6 +64,7 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
                 "pipeline.worker.visibility-timeout=3s",
                 "pipeline.worker.heartbeat-interval=1s",
                 "pipeline.worker.max-processing-time=10s",
+                "pipeline.worker.max-throttled-requeues=2",
                 "pipeline.worker.wait-time=1s",
                 "pipeline.queue.max-receive-count=3",
                 "pipeline.metrics.queue-depth-interval=1s"
@@ -169,7 +170,7 @@ class PipelineIntegrationTest {
         CreateUploadResponse upload = createUpload("rate-limited.mp4");
         // Longer than the backoff after a first delivery: one 3 s visibility timeout, plus up to 20%.
         Duration retryAfter = Duration.ofSeconds(8);
-        transcriber.rateLimitFirstCall(upload.objectKey(), retryAfter);
+        transcriber.rateLimitNextCalls(upload.objectKey(), 1, retryAfter);
 
         putFile(upload);
 
@@ -177,6 +178,34 @@ class PipelineIntegrationTest {
         assertThat(done.attempts()).isEqualTo(2);
         List<Instant> attempts = transcriber.callTimes(upload.objectKey());
         assertThat(Duration.between(attempts.get(0), attempts.get(1))).isGreaterThanOrEqualTo(retryAfter);
+    }
+
+    @Test
+    void rateLimitsDoNotUseUpTheRetries() throws Exception {
+        CreateUploadResponse upload = createUpload("busy-provider.mp4");
+        // Throttled as often as SQS delivers a message before dead-lettering it. If each throttle used up a delivery,
+        // the event would end up in the dead-letter queue instead.
+        int throttles = properties.queue().maxReceiveCount();
+        transcriber.rateLimitNextCalls(upload.objectKey(), throttles, Duration.ofSeconds(1));
+
+        putFile(upload);
+
+        UploadStatusResponse done = awaitStatus(upload.uploadId(), JobStatus.COMPLETED);
+        assertThat(done.attempts()).isEqualTo(throttles + 1);
+        assertThat(transcriber.calls(upload.objectKey())).isEqualTo(throttles + 1);
+    }
+
+    @Test
+    void anEventThatIsNeverLetThroughStillEndsUpInTheDeadLetterQueue() throws Exception {
+        CreateUploadResponse upload = createUpload("never-let-through.mp4");
+        transcriber.rateLimitNextCalls(upload.objectKey(), Integer.MAX_VALUE, Duration.ofSeconds(1));
+
+        putFile(upload);
+
+        awaitInDeadLetterQueue(upload.objectKey());
+        // Sent again max-throttled-requeues times, then each throttle used up a delivery like a failed attempt.
+        assertThat(transcriber.calls(upload.objectKey()))
+                .isEqualTo(properties.worker().maxThrottledRequeues() + properties.queue().maxReceiveCount());
     }
 
     @Test
@@ -226,11 +255,7 @@ class PipelineIntegrationTest {
 
         putFile(upload);
 
-        String deadLetterQueueUrl = queueUrl(properties.queue().deadLetterName());
-        await().atMost(Duration.ofSeconds(60)).until(
-                () -> sqs.receiveMessage(r -> r.queueUrl(deadLetterQueueUrl).waitTimeSeconds(1).maxNumberOfMessages(10))
-                        .messages(),
-                messages -> messages.stream().map(Message::body).anyMatch(body -> body.contains(upload.objectKey())));
+        awaitInDeadLetterQueue(upload.objectKey());
         Instant deadLettered = Instant.now();
 
         int maxReceiveCount = properties.queue().maxReceiveCount();
@@ -383,6 +408,15 @@ class PipelineIntegrationTest {
         return response.getStatusCode().is2xxSuccessful() ? response.getBody() : null;
     }
 
+    /** Waits until the event for {@code objectKey} shows up in the dead-letter queue. */
+    private void awaitInDeadLetterQueue(String objectKey) {
+        String deadLetterQueueUrl = queueUrl(properties.queue().deadLetterName());
+        await().atMost(Duration.ofSeconds(60)).until(
+                () -> sqs.receiveMessage(r -> r.queueUrl(deadLetterQueueUrl).waitTimeSeconds(1).maxNumberOfMessages(10))
+                        .messages(),
+                messages -> messages.stream().map(Message::body).anyMatch(body -> body.contains(objectKey)));
+    }
+
     private UploadStatusResponse awaitStatus(String uploadId, JobStatus expected) {
         return await().atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(200))
@@ -443,7 +477,8 @@ class PipelineIntegrationTest {
         private final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
         private final Map<String, List<Instant>> callTimes = new ConcurrentHashMap<>();
         private final Map<String, Integer> failuresLeft = new ConcurrentHashMap<>();
-        private final Map<String, Duration> rateLimits = new ConcurrentHashMap<>();
+        private final Map<String, Integer> rateLimitsLeft = new ConcurrentHashMap<>();
+        private final Map<String, Duration> retryAfters = new ConcurrentHashMap<>();
         private final Map<String, Duration> delays = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> hangs = new ConcurrentHashMap<>();
 
@@ -451,9 +486,10 @@ class PipelineIntegrationTest {
             failuresLeft.put(objectKey, times);
         }
 
-        /** The first call for the file fails the way a rate-limited provider does, asking to retry after a while. */
-        void rateLimitFirstCall(String objectKey, Duration retryAfter) {
-            rateLimits.put(objectKey, retryAfter);
+        /** The next calls for the file fail the way a rate-limited provider does, asking to retry after a while. */
+        void rateLimitNextCalls(String objectKey, int times, Duration retryAfter) {
+            retryAfters.put(objectKey, retryAfter);
+            rateLimitsLeft.put(objectKey, times);
         }
 
         void delay(String objectKey, Duration delay) {
@@ -494,9 +530,9 @@ class PipelineIntegrationTest {
                     throw new IllegalStateException("interrupted while simulating a hung transcription", e);
                 }
             }
-            Duration retryAfter = rateLimits.get(object.key());
-            if (retryAfter != null && call == 1) {
-                throw new RetryLaterException("simulated rate limit", retryAfter, null);
+            Integer rateLimited = rateLimitsLeft.computeIfPresent(object.key(), (key, remaining) -> remaining - 1);
+            if (rateLimited != null && rateLimited >= 0) {
+                throw new RetryLaterException("simulated rate limit", retryAfters.get(object.key()), null);
             }
             Integer left = failuresLeft.computeIfPresent(object.key(), (key, remaining) -> remaining - 1);
             if (left != null && left >= 0) {

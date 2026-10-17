@@ -7,6 +7,7 @@ import io.github.lindseyz1205.videopipeline.job.JobStore;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -24,9 +25,11 @@ import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
 import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
 import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 
 /**
  * Long-polls the upload event queue on a few threads and hands each message to {@link UploadEventHandler}.
@@ -43,6 +46,10 @@ public class UploadEventWorker implements SmartLifecycle {
     private static final Duration MAX_VISIBILITY = Duration.ofHours(12);
     /** Up to this share of a retry delay is added at random. */
     private static final double RETRY_JITTER = 0.2;
+    /** SQS delays a message it is sent by at most 15 minutes. */
+    private static final Duration MAX_SEND_DELAY = Duration.ofMinutes(15);
+    /** How many times the event was sent again after the provider throttled it. */
+    static final String THROTTLED_REQUEUES = "throttled-requeues";
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final SqsClient sqs;
@@ -74,6 +81,10 @@ public class UploadEventWorker implements SmartLifecycle {
             throw new IllegalArgumentException("pipeline.worker.max-retry-delay (" + settings.maxRetryDelay()
                     + ") must be between pipeline.worker.visibility-timeout (" + settings.visibilityTimeout()
                     + ") and 12 hours");
+        }
+        if (settings.maxThrottledRequeues() < 0) {
+            throw new IllegalArgumentException("pipeline.worker.max-throttled-requeues ("
+                    + settings.maxThrottledRequeues() + ") must not be negative");
         }
         this.sqs = sqs;
         this.handler = handler;
@@ -136,6 +147,8 @@ public class UploadEventWorker implements SmartLifecycle {
                                 .visibilityTimeout((int) settings.visibilityTimeout().toSeconds())
                                 // How often the message has been delivered, to back off its retries.
                                 .messageSystemAttributeNames(MessageSystemAttributeName.APPROXIMATE_RECEIVE_COUNT)
+                                // How often the event was sent again after throttling, to stop at the limit.
+                                .messageAttributeNames(THROTTLED_REQUEUES)
                                 .build())
                         .messages();
                 consecutiveFailures = 0;
@@ -186,11 +199,24 @@ public class UploadEventWorker implements SmartLifecycle {
      * Hides a message whose attempt failed for longer after each delivery, so a struggling provider or job store gets
      * room to recover instead of three quick retries.
      *
+     * <p>When the provider throttled the attempt and said how long to wait, the event is sent again with that delay
+     * instead, up to {@code max-throttled-requeues} times. Waiting out a rate limit then uses up none of its
+     * deliveries, which are meant for attempts that failed.
+     *
      * @param retryAfter how long the provider asked to wait, or {@code null}
      */
     private void retryLater(Message message, Duration retryAfter) {
-        Duration delay = retryDelay(receiveCount(message), maxReceiveCount, retryAfter, settings.visibilityTimeout(),
-                settings.maxRetryDelay(), ThreadLocalRandom.current().nextDouble());
+        int receiveCount = receiveCount(message);
+        double random = ThreadLocalRandom.current().nextDouble();
+        if (retryAfter != null && throttledRequeues(message) < settings.maxThrottledRequeues()) {
+            Duration copyDelay = requeueDelay(receiveCount, retryAfter, settings.visibilityTimeout(),
+                    settings.maxRetryDelay(), random);
+            if (requeue(message, copyDelay)) {
+                return;
+            }
+        }
+        Duration delay = retryDelay(receiveCount, maxReceiveCount, retryAfter, settings.visibilityTimeout(),
+                settings.maxRetryDelay(), random);
         try {
             sqs.changeMessageVisibility(ChangeMessageVisibilityRequest.builder()
                     .queueUrl(queueUrl)
@@ -200,6 +226,56 @@ public class UploadEventWorker implements SmartLifecycle {
         } catch (RuntimeException e) {
             log.warn("Could not delay the retry of message {}; it comes back after the visibility timeout",
                     message.messageId(), e);
+        }
+    }
+
+    /**
+     * Sends the event to the queue again, delayed, and deletes this delivery, so the copy starts over with a fresh
+     * receive count. If the delete fails, both come back, and the job record keeps the work from being done twice.
+     *
+     * @return false if the copy couldn't be sent; the message then retries as a failed attempt
+     */
+    private boolean requeue(Message message, Duration delay) {
+        int requeues = throttledRequeues(message) + 1;
+        try {
+            sqs.sendMessage(SendMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageBody(message.body())
+                    .delaySeconds((int) delay.toSeconds())
+                    .messageAttributes(Map.of(THROTTLED_REQUEUES, MessageAttributeValue.builder()
+                            .dataType("Number")
+                            .stringValue(Integer.toString(requeues))
+                            .build()))
+                    .build());
+        } catch (RuntimeException e) {
+            log.warn("Could not send throttled message {} again; it retries as a failed attempt",
+                    message.messageId(), e);
+            return false;
+        }
+        metrics.recordRequeued();
+        log.info("The provider throttled message {}; sent it again with a {}s delay ({} of {})", message.messageId(),
+                delay.toSeconds(), requeues, settings.maxThrottledRequeues());
+        try {
+            sqs.deleteMessage(DeleteMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .receiptHandle(message.receiptHandle())
+                    .build());
+        } catch (RuntimeException e) {
+            log.warn("Could not delete message {} after sending it again", message.messageId(), e);
+        }
+        return true;
+    }
+
+    /** How many times the event was sent again after throttling: 0 for the one S3 sent. */
+    static int throttledRequeues(Message message) {
+        MessageAttributeValue value = message.messageAttributes().get(THROTTLED_REQUEUES);
+        if (value == null) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value.stringValue());
+        } catch (NumberFormatException e) {
+            return Integer.MAX_VALUE; // counts as used up, so a bad value can't send an event around forever
         }
     }
 
@@ -242,6 +318,16 @@ public class UploadEventWorker implements SmartLifecycle {
         // SQS takes whole seconds. The base is whole seconds and jitter only adds, so rounding never goes below it.
         long seconds = Math.round(millis / 1000);
         return Duration.ofSeconds(Math.min(seconds, maxDelay.toSeconds()));
+    }
+
+    /**
+     * The delay for an event sent again after throttling: the same wait as {@link #retryDelay}, except that the last
+     * delivery waits too, since the copy starts over, and at most the 15 minutes SQS allows.
+     */
+    static Duration requeueDelay(int receiveCount, Duration retryAfter, Duration visibilityTimeout, Duration maxDelay,
+            double random) {
+        Duration delay = retryDelay(receiveCount, 0, retryAfter, visibilityTimeout, maxDelay, random);
+        return delay.compareTo(MAX_SEND_DELAY) > 0 ? MAX_SEND_DELAY : delay;
     }
 
     static Duration backoff(int consecutiveFailures) {
