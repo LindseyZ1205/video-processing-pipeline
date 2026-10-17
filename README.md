@@ -388,8 +388,8 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 - `UploadEventHandlerTest` covers the delete-or-keep decision for each situation: success, duplicate of a completed
   job, duplicate of a job still running, redelivery of the message that holds the lease, lease lost, transient
   failure (with and without a wait the provider asked for), permanent failure, unreachable job store, unreadable
-  message, S3 test event. It also checks the metric that each case records, and that a lease is kept alive only while
-  the file is being transcribed.
+  message, S3 test event. It also checks which outcomes let the message be deleted, the metric that each case
+  records, the size limit at its boundary, and that a lease is kept alive only while the file is being transcribed.
 - `UploadEventWorkerTest` checks both backoffs: the wait after a failed attempt (doubling per delivery, the cap,
   the jitter, a longer wait the provider asked for, none after the last delivery the redrive policy allows) and the
   pause in polling after SQS errors. It also checks the delay of a throttled event sent again, and how the copy
@@ -399,9 +399,14 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   each extension records, including when DynamoDB can't be reached.
 - `QueueDepthGaugesTest` checks the queue depth gauges, including that they keep their last value while SQS is
   unreachable.
-- `OpenAiTranscriptionServiceTest` checks the multipart request, how errors are classified and how `Retry-After` is
-  read (seconds or a date), against a mock server, and that a request that never gets an answer times out.
-- `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys) and key sanitizing.
+- `OpenAiTranscriptionServiceTest` checks, against a mock server, the multipart request (the model, and the file under
+  its own name), how errors are classified, how `Retry-After` is read (seconds or a date), and the 25 MB limit at its
+  boundary. It also checks that the provider won't start without an API key, and that a request that never gets an
+  answer times out.
+- `S3EventNotificationTest` and `UploadKeyTest` cover event parsing (including URL-encoded keys), key sanitizing, and
+  which strings count as upload IDs.
+- `AwsConfigurationTest` checks where presigned URLs point: the presign endpoint, the service's endpoint, or AWS
+  itself.
 - The `terraform + smoke test` CI job checks `terraform fmt`, applies [`infra/terraform`](infra/terraform) to
   LocalStack, and runs the smoke test against the service configured from the Terraform outputs. Then it checks that
   service's Prometheus metrics and JSON logs. It also rehearses the runbook's recovery: before the service starts, an
@@ -424,6 +429,35 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
 
 Each CI run puts line and branch coverage (JaCoCo, unit and integration tests combined) in the run summary, and
 uploads the HTML report as the `coverage-report` artifact.
+
+### Mutation testing
+
+Coverage shows which code the tests run, not whether they would notice that code doing something else.
+[PIT](https://pitest.org) measures the second part. It makes one small change to the compiled code at a time, like
+flipping a condition, removing a call or returning a constant, and reruns the tests. A change that every test still
+passes has survived. [`mutation-test.yml`](.github/workflows/mutation-test.yml) runs it by hand
+(`gh workflow run mutation-test.yml`) and lists the survivors in its summary.
+
+PIT reruns the unit tests only. The integration tests need Docker and take minutes, far too slow to run once per
+mutant. So the code that only the integration tests run, like the DynamoDB job store, the controllers and the SQS
+polling loop, has no unit coverage here. Among the mutants the unit tests do run, the share they kill is the test
+strength.
+
+[Run 39038991909](https://github.com/LindseyZ1205/video-processing-pipeline/actions/runs/39038991909), 2026-10-17:
+
+| Package | Mutants | Killed | Survived | No unit coverage | Test strength |
+|---|---|---|---|---|---|
+| `config` | 31 | 7 | 0 | 24 | 100% |
+| `job` | 32 | 0 | 0 | 32 | – |
+| `processing` | 187 | 120 | 2 | 65 | 98% |
+| `transcription` | 27 | 24 | 0 | 3 | 100% |
+| `upload` | 35 | 13 | 1 | 21 | 93% |
+| all | 312 | 164 | 3 | 145 | 98% |
+
+The first run left 14 survivors. 11 of them pointed at behavior no test checked, and got tests: which outcomes delete
+the message, the multipart request sent to OpenAI, the missing API key check, both size limits at their boundaries,
+the upload ID check, and presigning against real AWS. The 3 left are equivalent mutants. Each turns a `>` into `>=`
+where both branches return the same value at the boundary, so no test can tell them apart.
 
 ### How changes reach `main`
 
