@@ -2,11 +2,14 @@ package io.github.lindseyz1205.videopipeline.transcription;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -66,6 +69,9 @@ class OpenAiTranscriptionServiceTest {
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer sk-test"))
                 .andExpect(header(HttpHeaders.CONTENT_TYPE, startsWith(MediaType.MULTIPART_FORM_DATA_VALUE)))
+                // The model, and the file under its own name: the API detects the format from the extension.
+                .andExpect(content().string(allOf(containsString("name=\"model\""), containsString("whisper-1"),
+                        containsString("name=\"file\"; filename=\"talk.mp3\""))))
                 .andRespond(withSuccess("{\"text\":\"hello world\"}", MediaType.APPLICATION_JSON));
 
         assertThat(service.transcribe(talk)).isEqualTo("hello world");
@@ -115,6 +121,26 @@ class OpenAiTranscriptionServiceTest {
         assertThat(OpenAiTranscriptionService.retryAfter("soon", NOW)).isEmpty();
         assertThat(OpenAiTranscriptionService.retryAfter("-5", NOW)).isEmpty();
         assertThat(OpenAiTranscriptionService.retryAfter(null, NOW)).isEmpty();
+    }
+
+    @Test
+    void refusesToStartWithoutAnApiKey() {
+        var noKey = new PipelineProperties.Transcription.OpenAi(" ", "whisper-1", "https://api.openai.test/v1",
+                Duration.ofMinutes(5));
+
+        assertThatThrownBy(() -> new OpenAiTranscriptionService(RestClient.builder(), s3, noKey, Clock.systemUTC()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("OPENAI_API_KEY");
+    }
+
+    @Test
+    void aFileRightAtTheApiLimitIsStillSent() {
+        openAi.expect(requestTo(ENDPOINT))
+                .andRespond(withSuccess("{\"text\":\"all hands\"}", MediaType.APPLICATION_JSON));
+        StoredObject atTheLimit = new StoredObject("video-uploads", "uploads/user-1/id/all-hands.mp4",
+                OpenAiTranscriptionService.MAX_FILE_SIZE_BYTES, "video/mp4");
+
+        assertThat(service.transcribe(atTheLimit)).isEqualTo("all hands");
     }
 
     @Test

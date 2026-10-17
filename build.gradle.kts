@@ -5,6 +5,7 @@ plugins {
     jacoco
     id("org.springframework.boot") version "3.5.16"
     id("io.spring.dependency-management") version "1.1.7"
+    id("info.solidsoft.pitest") version "1.19.0"
 }
 
 group = "io.github.lindseyz1205"
@@ -53,4 +54,16 @@ tasks.jacocoTestReport {
         xml.required = true
         html.required = true
     }
+}
+
+// Mutation testing, run by hand in CI (.github/workflows/mutation-test.yml). The integration tests need Docker and take
+// minutes, far too slow to rerun for every mutant, so PIT runs the unit tests only.
+pitest {
+    pitestVersion = "1.30.0"
+    junit5PluginVersion = "1.2.3"
+    targetClasses = setOf("io.github.lindseyz1205.videopipeline.*")
+    excludedTestClasses = setOf("io.github.lindseyz1205.videopipeline.PipelineIntegrationTest")
+    threads = 4
+    outputFormats = setOf("HTML", "XML")
+    timestampedReports = false
 }
