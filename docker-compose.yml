@@ -26,3 +26,32 @@ services:
     depends_on:
       localstack:
         condition: service_healthy # the LocalStack image ships its own healthcheck
+
+  # Optional: `docker compose --profile monitoring up --build` also starts Prometheus on http://localhost:9090, which
+  # scrapes the service and evaluates the alert rules, and Grafana on http://localhost:3000 with the pipeline dashboard.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [monitoring]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: [monitoring]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Anyone on this machine can view the dashboard without logging in, read-only.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/pipeline.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
