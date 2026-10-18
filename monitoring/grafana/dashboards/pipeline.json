@@ -504,7 +504,8 @@
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10,
-            "showPoints": "never"
+            "showPoints": "never",
+            "axisSoftMax": 1
           }
         },
         "overrides": []
@@ -563,7 +564,8 @@
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10,
-            "showPoints": "never"
+            "showPoints": "never",
+            "axisSoftMax": 1
           }
         },
         "overrides": []
