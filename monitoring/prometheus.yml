@@ -1,0 +1,14 @@
+# Prometheus for the docker compose stack (`docker compose --profile monitoring up`): scrapes the service and
+# evaluates the alert rules. CI checks this file with `promtool check config`.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: video-processing-pipeline
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["app:8080"]

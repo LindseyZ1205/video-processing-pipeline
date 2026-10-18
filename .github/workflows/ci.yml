@@ -25,10 +25,12 @@ jobs:
       - name: Check the shell scripts
         run: shellcheck scripts/*.sh
 
-      # The alert rules must parse, and their unit tests (monitoring/alerts.test.yml) must pass.
-      - name: Check and test the alert rules
+      # The Prometheus config and the alert rules must parse, and the rules' unit tests (monitoring/alerts.test.yml)
+      # must pass.
+      - name: Check the Prometheus config and test the alert rules
         run: |
           promtool() { docker run --rm --entrypoint promtool -v "$PWD/monitoring:/rules:ro" -w /rules prom/prometheus:v3.15.0 "$@"; }
+          promtool check config prometheus.yml
           promtool check rules alerts.yml
           promtool test rules alerts.test.yml
 
@@ -188,7 +190,8 @@ jobs:
         if: always()
         run: cat service.log || true
 
-  # The "no Java needed" path: build the image and run the whole stack with docker compose, exactly as the README says.
+  # The "no Java needed" path: build the image and run the whole stack with docker compose, exactly as the README says,
+  # including the monitoring profile (Prometheus and Grafana).
   docker:
     name: docker compose + smoke test
     runs-on: ubuntu-latest
@@ -200,7 +203,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build the image and start the stack
-        run: docker compose up --build --detach --wait
+        run: docker compose --profile monitoring up --build --detach --wait
 
       - name: Wait for the service
         run: timeout 180 bash -c 'until curl -fsS http://localhost:8080/actuator/health | grep -q UP; do sleep 3; done'
@@ -208,15 +211,38 @@ jobs:
       - name: Smoke test
         run: ./scripts/smoke-test.sh
 
+      # Prometheus must scrape the service and evaluate the alert rules, and Grafana must load the dashboard
+      # (monitoring/grafana). After a minute of uploads, every panel's query must return data.
+      - name: Check Prometheus and the dashboard
+        run: |
+          for _ in 1 2 3 4; do
+            for _ in 1 2 3 4 5 6 7 8; do ./scripts/smoke-test.sh > /dev/null & done
+            sleep 15
+          done
+          wait
+          timeout 60 bash -c 'until curl -fsS http://localhost:3000/api/health > /dev/null; do sleep 2; done'
+          curl -fsS http://localhost:9090/api/v1/targets \
+            | jq -e '[.data.activeTargets[] | select(.labels.job == "video-processing-pipeline" and .health == "up")] | length == 1'
+          curl -fsS http://localhost:9090/api/v1/rules | jq -e '[.data.groups[].rules[]] | length > 0 and all(.health == "ok")'
+          curl -fsS http://localhost:3000/api/dashboards/uid/pipeline | jq -e '.dashboard.title == "Video processing pipeline"'
+          jq -r '.panels[].targets[].expr' monitoring/grafana/dashboards/pipeline.json | while read -r expr; do
+            series="$(curl -fsS --get --data-urlencode "query=$expr" http://localhost:9090/api/v1/query | jq '.data.result | length')"
+            echo "$series series: $expr"
+            [ "$series" -gt 0 ]
+          done
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: e2e/package-lock.json
 
-      # Drives the demo page in Chromium, the way a visitor first tries the project (e2e/tests/upload.spec.ts).
+      # Drives the demo page in Chromium, the way a visitor first tries the project (e2e/tests/upload.spec.ts), and takes
+      # the dashboard screenshot (e2e/tests/dashboard.spec.ts).
       - name: Browser test
         working-directory: e2e
+        env:
+          GRAFANA_URL: http://localhost:3000
         run: |
           npm ci
           npx playwright install --with-deps chromium
@@ -227,6 +253,12 @@ jobs:
         with:
           name: demo-screenshot
           path: e2e/screenshots/demo.png
+
+      - name: Upload dashboard screenshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: dashboard-screenshot
+          path: e2e/screenshots/dashboard.png
 
       - name: Upload Playwright report
         if: failure()
@@ -240,6 +272,10 @@ jobs:
       - name: Service log
         if: always()
         run: docker compose logs --no-color app
+
+      - name: Prometheus and Grafana logs
+        if: failure()
+        run: docker compose --profile monitoring logs --no-color prometheus grafana
 
       - name: Publish the image to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

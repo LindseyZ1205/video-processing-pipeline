@@ -289,7 +289,8 @@ docker compose up --build
 
 Then open <http://localhost:8080>. A small page there uploads a file through the whole pipeline and shows the
 transcript. The first build takes a few minutes, because Gradle downloads the dependencies inside the image. CI
-publishes the image built from `main` to `ghcr.io/lindseyz1205/video-processing-pipeline`.
+publishes the image built from `main` to `ghcr.io/lindseyz1205/video-processing-pipeline`. Add `--profile monitoring`
+to also start Prometheus and Grafana with the pipeline's dashboard (see [Dashboard](#dashboard)).
 
 **For development**, with Java 17 and Docker:
 
@@ -358,6 +359,28 @@ Log lines about a message or a job carry its `messageId` and `jobId` in the MDC.
 history is a single query in CloudWatch Logs Insights or Elasticsearch. The CI smoke test runs the service this way and
 checks that the IDs appear.
 
+### Dashboard
+
+The `monitoring` profile of docker compose adds Prometheus, which scrapes the service every 5 seconds and evaluates
+the alert rules, and Grafana, with a provisioned dashboard
+([`monitoring/grafana/dashboards/pipeline.json`](monitoring/grafana/dashboards/pipeline.json)):
+
+```bash
+docker compose --profile monitoring up --build
+```
+
+Grafana is on <http://localhost:3000>, with the dashboard as its home page and no login needed to view it. Prometheus
+is on <http://localhost:9090>; its `/alerts` page shows the state of every rule.
+
+![The pipeline's Grafana dashboard after a minute of uploads](docs/dashboard.png)
+
+The dashboard shows events per second by outcome, the pickup lag (p50 and p95), the depth of both queues,
+transcription time, lease extensions, throttled requeues and failed SQS polls. Above them sit the processed and failed
+counts, the dead-letter queue, and the alerts that are firing. The `docker compose + smoke test` CI job starts this
+profile and runs a minute of uploads. Then it checks that Prometheus scrapes the service and has loaded the alert
+rules, that Grafana has loaded the dashboard, and that every panel's query returns data. It also takes the screenshot
+above.
+
 ## Tests
 
 ```bash
@@ -413,9 +436,10 @@ The integration tests need Docker. They run on every push in [GitHub Actions](.g
   upload's event is received three times without being deleted, so SQS moves it to the dead-letter queue; after the
   smoke test, `scripts/redrive-dlq.sh` moves it back and the upload completes.
 - `shellcheck` checks the scripts in `scripts/` in the `build` job.
-- The `docker compose + smoke test` CI job builds the image, starts the stack with `docker compose up`, and runs the
-  same smoke test. On `main` it then publishes the image to GHCR. Runs on `main` never overlap, so `latest` is always
-  the image of the newest commit.
+- The `docker compose + smoke test` CI job builds the image, starts the stack with
+  `docker compose --profile monitoring up`, and runs the same smoke test. Then it checks Prometheus and the Grafana
+  dashboard (see [Dashboard](#dashboard)). On `main` it then publishes the image to GHCR. Runs on `main` never
+  overlap, so `latest` is always the image of the newest commit.
 - The same job then runs a browser test ([`e2e/tests/upload.spec.ts`](e2e/tests/upload.spec.ts)). Playwright opens
   the demo page in Chromium, picks a file, and waits for the transcript. That covers what the API smoke test can't:
   the page's JavaScript, and the browser's cross-origin PUT straight to S3, which breaks if CORS or the presigned
@@ -548,7 +572,7 @@ src/main/java/io/github/lindseyz1205/videopipeline/
 infra/terraform/    AWS resources and the service's IAM policy
 scripts/            end-to-end smoke test, dead-letter queue redrive
 e2e/                browser test of the demo page (Playwright)
-monitoring/         Prometheus alert rules and their unit tests
+monitoring/         Prometheus config, alert rules and their unit tests, Grafana dashboard
 load/               k6 load test of the whole pipeline
 docs/               runbook for the alerts, demo screenshot
 ```
@@ -559,8 +583,8 @@ docs/               runbook for the alerts, demo screenshot
 - **Deployment.** Terraform covers the resources the service uses, and there is a container image, but nothing runs
   the image yet: no compute (ECS, App Runner) and no remote Terraform state.
 - **Large files.** Multipart uploads, and a POST policy to enforce the size limit in S3.
-- **Dashboards and alert routing.** The alert rules are tested, but there's no Grafana dashboard, and no Alertmanager
-  configuration decides who gets paged.
+- **Alert routing.** The alert rules are tested and show on the dashboard, but no Alertmanager configuration decides
+  who gets paged.
 
 ## License
 
