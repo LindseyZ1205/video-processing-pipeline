@@ -26,9 +26,9 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("io.micrometer:micrometer-registry-prometheus")
-    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.9.1")
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.10.0")
 
-    implementation(platform("software.amazon.awssdk:bom:2.56.0"))
+    implementation(platform("software.amazon.awssdk:bom:2.57.3"))
     implementation("software.amazon.awssdk:s3")
     implementation("software.amazon.awssdk:sqs")
     implementation("software.amazon.awssdk:dynamodb")
